@@ -1,0 +1,11 @@
+# Install PyTorch separately to match your CUDA runtime/GPU wheel.
+# Example (RTX 3070, CUDA 12.1 wheel):
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+jupyterlab>=4.2,<5
+ipykernel>=6.29,<7
+numpy>=1.26,<3
+pandas>=2.2,<3
+matplotlib>=3.8,<4
+scikit-learn>=1.5,<2
+yfinance>=0.2.50,<0.3
