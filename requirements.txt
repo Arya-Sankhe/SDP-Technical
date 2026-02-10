@@ -9,3 +9,4 @@ pandas>=2.2,<3
 matplotlib>=3.8,<4
 scikit-learn>=1.5,<2
 alpaca-py>=0.42,<0.43
+pandas-market-calendars>=4.4,<5
