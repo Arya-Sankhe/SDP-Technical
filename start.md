@@ -59,7 +59,8 @@ jupyter server stop 8888
 Start Jupyter again later (second launch after closing):
 
 ```powershell
-cd C:\Users\user\Documents\GitHub\SDP-Technical
+D:
+cd \APPS\Github\SDP-Technical
 conda activate msft-gru
 
 # If you used setx previously, credentials are already persisted.
