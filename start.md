@@ -23,12 +23,12 @@ pip install -r requirements.txt
 # 6) Set Alpaca credentials for this terminal session
 $env:ALPACA_API_KEY="YOUR_ALPACA_API_KEY"
 $env:ALPACA_SECRET_KEY="YOUR_ALPACA_SECRET_KEY"
-$env:ALPACA_FEED="iex"
+$env:ALPACA_FEED="delayed_sip"
 
 # Optional: persist credentials for future terminals (run once, then reopen terminal)
 # setx ALPACA_API_KEY "YOUR_ALPACA_API_KEY"
 # setx ALPACA_SECRET_KEY "YOUR_ALPACA_SECRET_KEY"
-# setx ALPACA_FEED "iex"
+# setx ALPACA_FEED "delayed_sip"
 
 # 7) Register kernel for Jupyter
 python -m ipykernel install --user --name msft-gru --display-name "Python (msft-gru)"
@@ -67,7 +67,7 @@ conda activate msft-gru
 # If not persisted, set them again each new terminal:
 $env:ALPACA_API_KEY="YOUR_ALPACA_API_KEY"
 $env:ALPACA_SECRET_KEY="YOUR_ALPACA_SECRET_KEY"
-$env:ALPACA_FEED="iex"
+$env:ALPACA_FEED="delayed_sip"
 
 jupyter lab
 ```
