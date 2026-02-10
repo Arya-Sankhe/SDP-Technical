@@ -4,7 +4,8 @@ Use these exact commands in PowerShell or Anaconda Prompt:
 
 ```powershell
 # 1) Go to your repo
-cd C:\Users\user\Documents\GitHub\SDP-Technical
+D:
+cd \APPS\Github\SDP-Technical
 
 # 2) Create/activate env
 conda create -n msft-gru python=3.11 -y
