@@ -395,7 +395,8 @@ print('=' * 60)
 print('V10 MODEL SMOKE TEST')
 print('=' * 60)
 
-test_batch_size = 4
+test_device = RAG_DEVICE if LOW_VRAM_MODE else DEVICE
+test_batch_size = 2 if LOW_VRAM_MODE else 4
 test_seq_len = 96
 test_input_size = len(BASE_FEATURE_COLS) + 1
 test_horizon = 12
@@ -407,10 +408,10 @@ test_model = Seq2SeqAttnGRU(
     num_layers=NUM_LAYERS,
     dropout=DROPOUT,
     horizon=test_horizon,
-).to(DEVICE)
+).to(test_device)
 
-test_input = torch.randn(test_batch_size, test_seq_len, test_input_size).to(DEVICE)
-test_target = torch.randn(test_batch_size, test_horizon, len(TARGET_COLS)).to(DEVICE)
+test_input = torch.randn(test_batch_size, test_seq_len, test_input_size).to(test_device)
+test_target = torch.randn(test_batch_size, test_horizon, len(TARGET_COLS)).to(test_device)
 
 mu_out = test_model(test_input)
 assert mu_out.shape == (test_batch_size, test_horizon, len(TARGET_COLS))
@@ -423,12 +424,18 @@ print({
     'forward_shape': tuple(mu_out.shape),
     'sigma_shape': tuple(sigma_out.shape),
     'generated_shape': tuple(gen_out.shape),
+    'test_device': str(test_device),
 })
+
+test_model = test_model.to('cpu')
+del test_model, test_input, test_target, mu_out, sigma_out, gen_out
+cuda_cleanup()
 """
 
 
 ROLLING_ENGINE_SRC = code_src(V92, "class RollingPredictionLog")
-ROLLING_ENGINE_SRC += """
+if "def runrollingbacktest(" not in ROLLING_ENGINE_SRC:
+    ROLLING_ENGINE_SRC += """
 
 def runrollingbacktest(model, pricedf, windowsize, starttime, endtime):
     rb = RollingBacktester(
@@ -450,6 +457,397 @@ FRAME_SRC = FRAME_SRC.replace("render_single_frame_with_regime", "render_single_
 FRAME_SRC = FRAME_SRC.replace("generate_rolling_frames_with_regime", "generate_rolling_frames")
 
 REGIME_TEST_SRC = code_src(V92, "PHASE 2: REGIME DETECTION TEST CELL")
+
+
+V10_DEVICE_SETUP_SRC = """
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+torch.backends.cudnn.benchmark = True
+try:
+    torch.set_float32_matmul_precision('high')
+except Exception:
+    pass
+
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+GPU_TOTAL_MEM_GB = 0.0
+if torch.cuda.is_available():
+    GPU_TOTAL_MEM_GB = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+LOW_VRAM_MODE = bool(torch.cuda.is_available() and GPU_TOTAL_MEM_GB <= 10.0)
+ROLLING_TRAIN_DEVICE = torch.device('cpu') if LOW_VRAM_MODE else DEVICE
+RAG_DEVICE = torch.device('cpu') if LOW_VRAM_MODE else DEVICE
+
+def cuda_cleanup() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+print(f'Using device: {DEVICE}')
+if torch.cuda.is_available():
+    print('GPU:', torch.cuda.get_device_name(0))
+print({
+    'low_vram_mode': LOW_VRAM_MODE,
+    'gpu_total_mem_gb': round(GPU_TOTAL_MEM_GB, 2),
+    'rolling_train_device': str(ROLLING_TRAIN_DEVICE),
+    'rag_device': str(RAG_DEVICE),
+})
+"""
+
+
+V10_MODEL_CONFIG_SRC = """
+# Model Configuration
+HIDDEN_SIZE = 256  # Increased for better generation capacity
+NUM_LAYERS = 2
+DROPOUT = 0.20     # Slightly higher for stochasticity
+LEARNING_RATE = 5e-4
+WEIGHT_DECAY = 1e-5
+BASE_BATCH_SIZE = 256
+BATCH_SIZE = 32 if LOW_VRAM_MODE else BASE_BATCH_SIZE
+ROLLING_TRAIN_BATCH_SIZE = 16 if LOW_VRAM_MODE else min(128, BASE_BATCH_SIZE)
+"""
+
+
+V10_TRAINING_CONFIG_SRC = """
+# Training Configuration
+SWEEP_MAX_EPOCHS = 15
+SWEEP_PATIENCE = 5
+FINAL_MAX_EPOCHS = 60  # More epochs for convergence
+FINAL_PATIENCE = 12
+TF_START = 1.0
+TF_END = 0.0
+TF_DECAY_RATE = 0.95
+"""
+
+
+V10_INFERENCE_CONFIG_SRC = """
+# Inference Configuration - tuned for realistic 1-minute bars
+SAMPLING_TEMPERATURE = 0.50
+BASE_ENSEMBLE_SIZE = 16
+ENSEMBLE_SIZE = 8 if LOW_VRAM_MODE else BASE_ENSEMBLE_SIZE
+TREND_LOOKBACK_BARS = 20
+STRONG_TREND_THRESHOLD = 0.002
+VOLATILITY_SCALING = True
+MIN_PREDICTED_VOL = 0.0001
+LOG_SIGMA_MIN = math.log(MIN_PREDICTED_VOL)
+LOG_SIGMA_MAX = math.log(0.01)
+"""
+
+
+V10_PHASE5_RAG_CONFIG_SRC = """
+# Phase 5: Retrieval-Augmented Pattern Memory
+RAG_EMBEDDING_DIM = 64
+RAG_K_RETRIEVE = 5
+RAG_BLEND_WEIGHT = 0.25
+RAG_MAX_PATTERNS = 3000 if LOW_VRAM_MODE else 4000
+ROLLING_RAG_MAX_PATTERNS = 1500 if LOW_VRAM_MODE else RAG_MAX_PATTERNS
+RAG_ENCODER_HIDDEN = 128
+RAG_ENCODER_LAYERS = 2
+RAG_BUILD_BATCH_SIZE = 32 if LOW_VRAM_MODE else 128
+"""
+
+
+V10_ROLLING_CONFIG_SRC = """
+# V8 rolling configuration (frame generator mode)
+ROLLINGSTARTTIME = '09:30'
+ROLLINGENDTIME = '16:00'
+ROLLING_STEP = 1  # 1 = every minute
+
+DEFAULT_ROLLING_TEMPERATURE = 0.45
+BASE_ROLLING_TEMPERATURE = DEFAULT_ROLLING_TEMPERATURE
+USE_TEMPERATURE_SCHEDULE = True
+TEMPERATURESCHEDULE = [
+    ('09:30', '10:15', 0.35),
+    ('10:15', '14:00', 0.45),
+    ('14:00', '16:00', 0.55),
+]
+
+ROLLING_BACKTEST_DATE = None  # e.g. '2025-02-13'
+
+FRAME_OUTPUT_DIR = Path('output/jupyter-notebook/frames/v10')
+FRAME_FILENAME_PATTERN = 'frame_{:04d}.png'
+FRAME_DPI = 180
+FRAME_FIGSIZE = (18, 8)
+FRAME_HISTORY_BARS = 220
+
+print({
+    'ROLLINGSTARTTIME': ROLLINGSTARTTIME,
+    'ROLLINGENDTIME': ROLLINGENDTIME,
+    'ROLLING_STEP': ROLLING_STEP,
+    'DEFAULT_ROLLING_TEMPERATURE': DEFAULT_ROLLING_TEMPERATURE,
+    'USE_TEMPERATURE_SCHEDULE': USE_TEMPERATURE_SCHEDULE,
+    'ROLLING_BACKTEST_DATE': ROLLING_BACKTEST_DATE,
+    'FRAME_OUTPUT_DIR': str(FRAME_OUTPUT_DIR),
+    'FRAME_DPI': FRAME_DPI,
+})
+"""
+
+
+V10_LOSS_SRC = """
+def clamp_log_sigma(log_sigma):
+    return torch.clamp(log_sigma, min=LOG_SIGMA_MIN, max=LOG_SIGMA_MAX)
+
+
+def nll_loss(mu, log_sigma, target):
+    \"\"\"Per-step Gaussian negative log-likelihood.\"\"\"
+    bounded_log_sigma = clamp_log_sigma(log_sigma)
+    sigma = torch.exp(bounded_log_sigma)
+    return 0.5 * ((target - mu) / sigma) ** 2 + bounded_log_sigma + 0.5 * np.log(2 * np.pi)
+
+
+def candle_range_loss(mu, target):
+    pred_range = mu[:, :, 1] - mu[:, :, 2]  # High - Low
+    actual_range = target[:, :, 1] - target[:, :, 2]
+    return ((pred_range - actual_range) ** 2).mean()
+
+
+def volatility_match_loss(mu, log_sigma, target):
+    \"\"\"Calibrate sigma to realized autoregressive forecast error.\"\"\"
+    pred_vol = torch.exp(clamp_log_sigma(log_sigma))
+    realized_abs_error = (target - mu).detach().abs()
+    return ((pred_vol - realized_abs_error) ** 2).mean()
+
+
+def directional_penalty(mu, target):
+    pred_close = mu[:, :, 3]
+    actual_close = target[:, :, 3]
+    mask = actual_close.abs() >= DIRECTION_EPS
+    if not mask.any():
+        return pred_close.new_tensor(0.0)
+    sign_match = torch.sign(pred_close[mask]) * torch.sign(actual_close[mask])
+    penalty = torch.clamp(-sign_match, min=0.0)
+    return penalty.mean()
+
+
+def compute_target_constraints(target_windows: np.ndarray) -> dict[str, np.ndarray]:
+    flat = target_windows.reshape(-1, target_windows.shape[-1]).astype(np.float32)
+    target_std = flat.std(axis=0).astype(np.float32)
+    if APPLY_CLIPPING:
+        clip_low = np.quantile(flat, CLIP_QUANTILES[0], axis=0).astype(np.float32)
+        clip_high = np.quantile(flat, CLIP_QUANTILES[1], axis=0).astype(np.float32)
+    else:
+        clip_low = np.min(flat, axis=0).astype(np.float32)
+        clip_high = np.max(flat, axis=0).astype(np.float32)
+    sigma_cap = np.clip(target_std * 3.0, MIN_PREDICTED_VOL, 0.01).astype(np.float32)
+    return {
+        'clip_low': clip_low,
+        'clip_high': clip_high,
+        'target_std': target_std,
+        'sigma_cap': sigma_cap,
+    }
+
+
+def apply_target_clipping(target_windows: np.ndarray, constraints: dict[str, np.ndarray]) -> np.ndarray:
+    low = constraints['clip_low'].reshape(1, 1, -1)
+    high = constraints['clip_high'].reshape(1, 1, -1)
+    return np.clip(target_windows, low, high).astype(np.float32)
+"""
+
+
+V10_TRAIN_EPOCH_SRC = """
+def tf_ratio_for_epoch(epoch):
+    ratio = TF_START * (TF_DECAY_RATE ** (epoch - 1))
+    return max(float(TF_END), float(ratio))
+
+
+def run_epoch(model, loader, step_weights_t, optimizer=None, tf_ratio=0.0, device=None):
+    is_train = optimizer is not None
+    model.train(is_train)
+    device = DEVICE if device is None else torch.device(device)
+
+    total_loss, nll_total, range_total, vol_total, dir_total = 0, 0, 0, 0, 0
+    n_items = 0
+
+    for xb, yb_s, yb_r in loader:
+        xb = xb.to(device)
+        yb_s = yb_s.to(device)
+
+        if is_train:
+            optimizer.zero_grad(set_to_none=True)
+
+        with torch.set_grad_enabled(is_train):
+            mu, log_sigma = model(
+                xb,
+                y_teacher=yb_s if is_train else None,
+                teacher_forcing_ratio=tf_ratio if is_train else 0.0,
+                return_sigma=True,
+            )
+
+            nll = (nll_loss(mu, log_sigma, yb_s) * step_weights_t).mean()
+            rng = candle_range_loss(mu, yb_s)
+            vol = volatility_match_loss(mu, log_sigma, yb_s)
+            dir_pen = directional_penalty(mu, yb_s)
+
+            loss = nll + RANGE_LOSS_WEIGHT * rng + VOLATILITY_WEIGHT * vol + DIR_PENALTY_WEIGHT * dir_pen
+
+            if is_train:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+
+        bs = xb.size(0)
+        total_loss += loss.item() * bs
+        nll_total += nll.item() * bs
+        range_total += rng.item() * bs
+        vol_total += vol.item() * bs
+        dir_total += dir_pen.item() * bs
+        n_items += bs
+
+    return {
+        'total': total_loss / max(n_items, 1),
+        'nll': nll_total / max(n_items, 1),
+        'range': range_total / max(n_items, 1),
+        'vol': vol_total / max(n_items, 1),
+        'dir': dir_total / max(n_items, 1),
+    }
+"""
+
+
+V10_TRAIN_MODEL_SRC = """
+def train_model(model, train_loader, val_loader, max_epochs, patience, device=None):
+    device = DEVICE if device is None else torch.device(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, min_lr=1e-6)
+
+    step_idx = np.arange(HORIZON, dtype=np.float32)
+    step_w = 1.0 + (step_idx / max(HORIZON - 1, 1)) ** STEP_LOSS_POWER
+    step_weights_t = torch.as_tensor(step_w, dtype=torch.float32, device=device).view(1, HORIZON, 1)
+
+    best_val = float('inf')
+    best_state = copy.deepcopy(model.state_dict())
+    wait = 0
+    rows = []
+
+    for epoch in range(1, max_epochs + 1):
+        tf = tf_ratio_for_epoch(epoch)
+        tr = run_epoch(model, train_loader, step_weights_t, optimizer=optimizer, tf_ratio=tf, device=device)
+        va = run_epoch(model, val_loader, step_weights_t, optimizer=None, tf_ratio=0.0, device=device)
+
+        scheduler.step(va['total'])
+        lr = optimizer.param_groups[0]['lr']
+
+        rows.append({
+            'epoch': epoch, 'tf_ratio': tf, 'lr': lr,
+            'train_total': tr['total'], 'val_total': va['total'],
+            'train_nll': tr['nll'], 'val_nll': va['nll'],
+            'train_range': tr['range'], 'val_range': va['range'],
+        })
+
+        print(f"Epoch {epoch:02d} | tf={tf:.3f} | "
+              f"train={tr['total']:.6f} (nll={tr['nll']:.6f}) | "
+              f"val={va['total']:.6f} (nll={va['nll']:.6f}) | lr={lr:.6g} | device={device}")
+
+        if va['total'] < best_val:
+            best_val = va['total']
+            best_state = copy.deepcopy(model.state_dict())
+            wait = 0
+        else:
+            wait += 1
+            if wait >= patience:
+                print(f'Early stopping at epoch {epoch}.')
+                break
+
+    model.load_state_dict(best_state)
+    return pd.DataFrame(rows)
+"""
+
+
+def apply_v10_stability_patches(nb: dict) -> None:
+    base.replace_cell_source(nb, "SEED = 42", V10_DEVICE_SETUP_SRC, cell_type="code")
+    base.replace_cell_source(nb, "# Model Configuration", V10_MODEL_CONFIG_SRC, cell_type="code")
+    base.replace_cell_source(nb, "# Training Configuration", V10_TRAINING_CONFIG_SRC, cell_type="code")
+    base.replace_cell_source(nb, "# Inference Configuration - v7.5 Ensemble Settings", V10_INFERENCE_CONFIG_SRC, cell_type="code")
+    base.replace_cell_source(nb, "# Phase 5: Retrieval-Augmented Pattern Memory", V10_PHASE5_RAG_CONFIG_SRC, cell_type="code")
+    base.replace_cell_source(nb, "# V8 rolling configuration (frame generator mode)", V10_ROLLING_CONFIG_SRC, cell_type="code")
+    base.replace_cell_source(nb, "print('=' * 60)\nprint('V10 MODEL SMOKE TEST')", V10_MODEL_TEST_SRC, cell_type="code")
+    base.replace_cell_source(nb, "def nll_loss(mu, log_sigma, target):", V10_LOSS_SRC, cell_type="code")
+    base.replace_cell_source(nb, "def tf_ratio_for_epoch(epoch):", V10_TRAIN_EPOCH_SRC, cell_type="code")
+    base.replace_cell_source(nb, "def train_model(model, train_loader, val_loader, max_epochs, patience):", V10_TRAIN_MODEL_SRC, cell_type="code")
+
+    rag_src = base.cell_text(nb["cells"][base.find_cell_index(nb, "class RAGPatternRetriever", cell_type="code")])
+    rag_src = rag_src.replace(
+        "    def build_database(self, sequences: torch.Tensor, future_paths: torch.Tensor, batch_size: int = 256) -> None:\n",
+        "    def build_database(self, sequences: torch.Tensor, future_paths: torch.Tensor, batch_size: int = RAG_BUILD_BATCH_SIZE) -> None:\n",
+    )
+    base.replace_cell_source(nb, "class RAGPatternRetriever", rag_src, cell_type="code")
+
+    model_src = base.cell_text(nb["cells"][base.find_cell_index(nb, "class Seq2SeqAttnGRU", cell_type="code")])
+    model_src = model_src.replace(
+        "        self.hidden_size = hidden_size\n        self.rag_retriever: Optional[RAGPatternRetriever] = None\n",
+        "        self.hidden_size = hidden_size\n        self.return_clip_low: Optional[torch.Tensor] = None\n        self.return_clip_high: Optional[torch.Tensor] = None\n        self.sigma_cap: Optional[torch.Tensor] = None\n        self.rag_retriever: Optional[RAGPatternRetriever] = None\n",
+    )
+    model_src = model_src.replace(
+        "        nn.init.zeros_(self.log_sigma_head[-1].weight)\n        nn.init.zeros_(self.log_sigma_head[-1].bias)\n\n    def attach_retriever(self, retriever: RAGPatternRetriever) -> None:\n        self.rag_retriever = retriever\n",
+        """        nn.init.zeros_(self.log_sigma_head[-1].weight)\n        nn.init.zeros_(self.log_sigma_head[-1].bias)\n\n    def _bound_log_sigma(self, log_sigma: torch.Tensor) -> torch.Tensor:\n        return torch.clamp(log_sigma, min=LOG_SIGMA_MIN, max=LOG_SIGMA_MAX)\n\n    def set_prediction_constraints(self, clip_low: np.ndarray, clip_high: np.ndarray, sigma_cap: np.ndarray) -> None:\n        self.return_clip_low = torch.as_tensor(clip_low, dtype=torch.float32)\n        self.return_clip_high = torch.as_tensor(clip_high, dtype=torch.float32)\n        self.sigma_cap = torch.as_tensor(sigma_cap, dtype=torch.float32)\n\n    def _clip_returns(self, values: torch.Tensor, widen: float = 1.0) -> torch.Tensor:\n        if self.return_clip_low is None or self.return_clip_high is None:\n            return values\n        low = self.return_clip_low.to(values.device).view(1, -1)\n        high = self.return_clip_high.to(values.device).view(1, -1)\n        if widen != 1.0:\n            center = 0.5 * (low + high)\n            half = 0.5 * (high - low) * widen\n            low = center - half\n            high = center + half\n        return torch.maximum(torch.minimum(values, high), low)\n\n    def _cap_sigma(self, sigma: torch.Tensor, historical_vol: Optional[float]) -> torch.Tensor:\n        if self.sigma_cap is not None:\n            sigma = torch.minimum(sigma, self.sigma_cap.to(sigma.device).view(1, -1))\n        if historical_vol is not None:\n            hist_cap = max(float(historical_vol) * 3.0, MIN_PREDICTED_VOL)\n            sigma = torch.minimum(sigma, torch.full_like(sigma, hist_cap))\n        return torch.maximum(sigma, torch.full_like(sigma, MIN_PREDICTED_VOL))\n\n    def attach_retriever(self, retriever: RAGPatternRetriever) -> None:\n        self.rag_retriever = retriever\n""",
+    )
+    model_src = model_src.replace(
+        "            mu = self.mu_head(out_features)\n            log_sigma = self.log_sigma_head(out_features)\n",
+        "            mu = self._clip_returns(self.mu_head(out_features), widen=1.0)\n            log_sigma = self._bound_log_sigma(self.log_sigma_head(out_features))\n",
+    )
+    model_src = model_src.replace(
+        "                else:\n                    noise = torch.randn_like(mu) * torch.exp(log_sigma).detach()\n                    dec_input = mu + noise\n",
+        "                else:\n                    dec_input = mu.detach()\n",
+    )
+    model_src = model_src.replace(
+        "                mu = self.mu_head(out_features)\n                log_sigma = self.log_sigma_head(out_features)\n                sigma = torch.exp(log_sigma) * temperature\n                if historical_vol is not None and t < 5:\n                    sigma = torch.ones_like(sigma) * historical_vol\n                sigma = torch.maximum(sigma, torch.full_like(sigma, MIN_PREDICTED_VOL))\n                noise = torch.randn_like(mu) * sigma\n                sample = mu + noise\n",
+        "                mu = self._clip_returns(self.mu_head(out_features), widen=1.10)\n                log_sigma = self._bound_log_sigma(self.log_sigma_head(out_features))\n                sigma = self._cap_sigma(torch.exp(log_sigma) * max(float(temperature), 0.0), historical_vol)\n                if float(temperature) <= 0.0:\n                    noise = torch.zeros_like(mu)\n                else:\n                    noise = torch.randn_like(mu) * sigma\n                sample = self._clip_returns(mu + noise, widen=1.15)\n",
+    )
+    model_src = model_src.replace(
+        "                adjusted_paths.append(adjusted_path.to(generated_paths.device))\n",
+        "                adjusted_paths.append(self._clip_returns(adjusted_path.to(generated_paths.device), widen=1.15))\n",
+    )
+    base.replace_cell_source(nb, "class Seq2SeqAttnGRU", model_src, cell_type="code")
+
+    run_fold_src = base.cell_text(nb["cells"][base.find_cell_index(nb, "def run_fold(", cell_type="code")])
+    run_fold_src = run_fold_src.replace(
+        "    X_train, y_train_s, y_train_r = X_all[tr_m], y_all_s[tr_m], y_all_r[tr_m]\n    X_val, y_val_s, y_val_r = X_all[va_m], y_all_s[va_m], y_all_r[va_m]\n    X_test, y_test_s, y_test_r = X_all[te_m], y_all_s[te_m], y_all_r[te_m]\n    test_starts = starts[te_m]\n    test_prev_close = prev_close_starts[te_m]\n",
+        "    X_train, y_train_s, y_train_r = X_all[tr_m], y_all_s[tr_m], y_all_r[tr_m]\n    X_val, y_val_s, y_val_r = X_all[va_m], y_all_s[va_m], y_all_r[va_m]\n    X_test, y_test_s, y_test_r = X_all[te_m], y_all_s[te_m], y_all_r[te_m]\n    test_starts = starts[te_m]\n    test_prev_close = prev_close_starts[te_m]\n\n    target_constraints = compute_target_constraints(y_train_r)\n    if APPLY_CLIPPING:\n        y_train_s = apply_target_clipping(y_train_s, target_constraints)\n        y_val_s = apply_target_clipping(y_val_s, target_constraints)\n",
+    )
+    run_fold_src = run_fold_src.replace(
+        "    ).to(DEVICE)\n\n\n    hist = train_model(model, train_loader, val_loader, max_epochs, patience)\n",
+        "    ).to(DEVICE)\n    model.set_prediction_constraints(\n        target_constraints['clip_low'],\n        target_constraints['clip_high'],\n        target_constraints['sigma_cap'],\n    )\n\n    hist = train_model(model, train_loader, val_loader, max_epochs, patience)\n",
+    )
+    run_fold_src = run_fold_src.replace(".to(DEVICE)\n    rag_limit = min(RAG_MAX_PATTERNS, len(X_train))", ".to(RAG_DEVICE)\n    rag_limit = min(RAG_MAX_PATTERNS, len(X_train))")
+    run_fold_src = run_fold_src.replace(
+        "    rag_retriever.build_database(\n        sequences=torch.from_numpy(X_train[:rag_limit]).float(),\n        future_paths=torch.from_numpy(y_train_r[:rag_limit]).float(),\n    )\n",
+        "    rag_retriever.build_database(\n        sequences=torch.from_numpy(X_train[:rag_limit]).float(),\n        future_paths=torch.from_numpy(y_train_r[:rag_limit]).float(),\n        batch_size=RAG_BUILD_BATCH_SIZE,\n    )\n",
+    )
+    run_fold_src = run_fold_src.replace("    actual_ohlc_1 = price_vals[test_starts + 1]\n    prev_ohlc = price_vals[test_starts]\n", "    actual_ohlc_1 = price_vals[test_starts]\n    prev_ohlc = price_vals[test_starts - 1]\n")
+    run_fold_src = run_fold_src.replace("    context_df = price_fold.iloc[test_starts[last_idx]-window:test_starts[last_idx]+1][OHLC_COLS]\n", "    context_df = price_fold.iloc[test_starts[last_idx]-window:test_starts[last_idx]][OHLC_COLS]\n")
+    run_fold_src = run_fold_src.replace(
+        "    return {\n",
+        "    model = model.to('cpu')\n    cuda_cleanup()\n\n    return {\n",
+    )
+    base.replace_cell_source(nb, "def run_fold(", run_fold_src, cell_type="code")
+
+    rolling_train_src = base.cell_text(nb["cells"][base.find_cell_index(nb, "def train_v7_model_for_rolling(", cell_type="code")])
+    rolling_train_src = rolling_train_src.replace(
+        "    X_train, y_train_s, y_train_r = X_all[:split], y_all_s[:split], y_all_r[:split]\n    X_val, y_val_s, y_val_r = X_all[split:], y_all_s[split:], y_all_r[split:]\n",
+        "    X_train, y_train_s, y_train_r = X_all[:split], y_all_s[:split], y_all_r[:split]\n    X_val, y_val_s, y_val_r = X_all[split:], y_all_s[split:], y_all_r[split:]\n\n    target_constraints = compute_target_constraints(y_train_r)\n    if APPLY_CLIPPING:\n        y_train_s = apply_target_clipping(y_train_s, target_constraints)\n        y_val_s = apply_target_clipping(y_val_s, target_constraints)\n",
+    )
+    rolling_train_src = rolling_train_src.replace(
+        "    train_loader = DataLoader(MultiStepDataset(X_train, y_train_s, y_train_r), batch_size=BATCH_SIZE, shuffle=True)\n    val_loader = DataLoader(MultiStepDataset(X_val, y_val_s, y_val_r), batch_size=BATCH_SIZE, shuffle=False)\n",
+        "    train_loader = DataLoader(MultiStepDataset(X_train, y_train_s, y_train_r), batch_size=ROLLING_TRAIN_BATCH_SIZE, shuffle=True)\n    val_loader = DataLoader(MultiStepDataset(X_val, y_val_s, y_val_r), batch_size=ROLLING_TRAIN_BATCH_SIZE, shuffle=False)\n",
+    )
+    rolling_train_src = rolling_train_src.replace(
+        "    ).to(DEVICE)\n\n    print({\n",
+        "    ).to(ROLLING_TRAIN_DEVICE)\n    model.set_prediction_constraints(\n        target_constraints['clip_low'],\n        target_constraints['clip_high'],\n        target_constraints['sigma_cap'],\n    )\n\n    print({\n",
+    )
+    rolling_train_src = rolling_train_src.replace(
+        "        'backtest_date': backtest_date,\n",
+        "        'backtest_date': backtest_date,\n        'rolling_train_device': str(ROLLING_TRAIN_DEVICE),\n        'rolling_train_batch_size': ROLLING_TRAIN_BATCH_SIZE,\n",
+    )
+    rolling_train_src = rolling_train_src.replace(
+        "    history_df = train_model(model, train_loader, val_loader, max_epochs=FINAL_MAX_EPOCHS, patience=FINAL_PATIENCE)\n",
+        "    history_df = train_model(model, train_loader, val_loader, max_epochs=FINAL_MAX_EPOCHS, patience=FINAL_PATIENCE, device=ROLLING_TRAIN_DEVICE)\n\n    model = model.to('cpu')\n    cuda_cleanup()\n",
+    )
+    rolling_train_src = rolling_train_src.replace(".to(DEVICE)\n    rag_limit = min(RAG_MAX_PATTERNS, len(X_all))", ".to(RAG_DEVICE)\n    rag_limit = min(ROLLING_RAG_MAX_PATTERNS, len(X_all))")
+    rolling_train_src = rolling_train_src.replace(
+        "    rag_retriever.build_database(\n        sequences=torch.from_numpy(X_all[:rag_limit]).float(),\n        future_paths=torch.from_numpy(y_all_r[:rag_limit]).float(),\n    )\n",
+        "    rag_retriever.build_database(\n        sequences=torch.from_numpy(X_all[:rag_limit]).float(),\n        future_paths=torch.from_numpy(y_all_r[:rag_limit]).float(),\n        batch_size=RAG_BUILD_BATCH_SIZE,\n    )\n",
+    )
+    base.replace_cell_source(nb, "def train_v7_model_for_rolling(", rolling_train_src, cell_type="code")
 
 
 def build_v10() -> dict:
@@ -635,6 +1033,7 @@ MULTISCALE_N_FFTS = [8, 16, 32]
         cell_type="code",
     )
 
+    apply_v10_stability_patches(nb)
     base.patch_min_predicted_vol(nb)
     base.clear_notebook_outputs(nb)
     return nb
