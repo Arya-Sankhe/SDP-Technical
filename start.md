@@ -62,6 +62,7 @@ Start Jupyter again later (second launch after closing):
 D:
 cd \APPS\Github\SDP-Technical
 conda activate msft-gru
+jupyter lab
 
 # If you used setx previously, credentials are already persisted.
 # If not persisted, set them again each new terminal:
@@ -69,5 +70,4 @@ $env:ALPACA_API_KEY="YOUR_ALPACA_API_KEY"
 $env:ALPACA_SECRET_KEY="YOUR_ALPACA_SECRET_KEY"
 $env:ALPACA_FEED="iex"
 
-jupyter lab
 ```
