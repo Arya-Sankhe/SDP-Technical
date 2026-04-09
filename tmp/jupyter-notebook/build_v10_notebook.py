@@ -506,6 +506,8 @@ WEIGHT_DECAY = 1e-5
 BASE_BATCH_SIZE = 256
 BATCH_SIZE = 32 if LOW_VRAM_MODE else BASE_BATCH_SIZE
 ROLLING_TRAIN_BATCH_SIZE = 16 if LOW_VRAM_MODE else min(128, BASE_BATCH_SIZE)
+BASE_EVAL_BATCH_SIZE = 256
+EVAL_BATCH_SIZE = 32 if LOW_VRAM_MODE else BASE_EVAL_BATCH_SIZE
 """
 
 
@@ -753,6 +755,253 @@ def train_model(model, train_loader, val_loader, max_epochs, patience, device=No
 """
 
 
+V10_RUN_FOLD_SRC = """
+def run_fold(fold_name, price_fold, window, max_epochs, patience, run_sanity=False, quick_mode=False):
+    feat_fold = build_feature_frame(price_fold)
+    target_fold = build_target_frame(feat_fold)
+
+    input_raw = feat_fold[BASE_FEATURE_COLS].to_numpy(np.float32)
+    target_raw = target_fold[TARGET_COLS].to_numpy(np.float32)
+    row_imputed = feat_fold['row_imputed'].to_numpy(np.int8).astype(bool)
+    row_open_skip = feat_fold['row_open_skip'].to_numpy(np.int8).astype(bool)
+    prev_close = feat_fold['prev_close'].to_numpy(np.float32)
+    price_vals = price_fold.loc[feat_fold.index, OHLC_COLS].to_numpy(np.float32)
+
+    tr_end, va_end = split_points(len(input_raw))
+
+    # Standardize inputs only
+    in_mean, in_std = input_raw[:tr_end].mean(axis=0), input_raw[:tr_end].std(axis=0)
+    in_std = np.where(in_std < 1e-8, 1.0, in_std)
+    input_scaled = (input_raw - in_mean) / in_std
+
+    # No target scaling (raw returns)
+    target_scaled = target_raw.copy()
+
+    X_all, y_all_s, y_all_r, starts, prev_close_starts, dropped_imputed, dropped_skip = make_multistep_windows(
+        input_scaled, target_scaled, target_raw, row_imputed, row_open_skip, prev_close, window, HORIZON
+    )
+
+    if len(X_all) == 0:
+        raise RuntimeError(f'{fold_name}: no windows available.')
+
+    end_idx = starts + HORIZON - 1
+    tr_m = end_idx < tr_end
+    va_m = (end_idx >= tr_end) & (end_idx < va_end)
+    te_m = end_idx >= va_end
+
+    X_train, y_train_s, y_train_r = X_all[tr_m], y_all_s[tr_m], y_all_r[tr_m]
+    X_val, y_val_s, y_val_r = X_all[va_m], y_all_s[va_m], y_all_r[va_m]
+    X_test, y_test_s, y_test_r = X_all[te_m], y_all_s[te_m], y_all_r[te_m]
+    test_starts = starts[te_m]
+    test_prev_close = prev_close_starts[te_m]
+
+    target_constraints = compute_target_constraints(y_train_r)
+    if APPLY_CLIPPING:
+        y_train_s = apply_target_clipping(y_train_s, target_constraints)
+        y_val_s = apply_target_clipping(y_val_s, target_constraints)
+
+    print(f'Samples: train={len(X_train)}, val={len(X_val)}, test={len(X_test)}')
+
+    train_loader = DataLoader(
+        MultiStepDataset(X_train, y_train_s, y_train_r),
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+    )
+    val_loader = DataLoader(
+        MultiStepDataset(X_val, y_val_s, y_val_r),
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+    )
+
+    model = Seq2SeqAttnGRU(
+        input_size=X_train.shape[-1],
+        output_size=len(TARGET_COLS),
+        hidden_size=HIDDEN_SIZE,
+        num_layers=NUM_LAYERS,
+        dropout=DROPOUT,
+        horizon=HORIZON,
+    ).to(DEVICE)
+    model.set_prediction_constraints(
+        target_constraints['clip_low'],
+        target_constraints['clip_high'],
+        target_constraints['sigma_cap'],
+    )
+
+    def _predict_step1_returns(eval_model, X_input, eval_device):
+        eval_model = eval_model.to(eval_device)
+        eval_model.eval()
+        preds = []
+        with torch.no_grad():
+            for start in range(0, len(X_input), EVAL_BATCH_SIZE):
+                xb = torch.from_numpy(X_input[start:start + EVAL_BATCH_SIZE]).float().to(eval_device)
+                preds.append(eval_model(xb)[:, 0, :].detach().cpu().numpy())
+        if not preds:
+            return np.zeros((0, len(TARGET_COLS)), dtype=np.float32)
+        return np.concatenate(preds, axis=0)
+
+    def _build_step1_metrics(eval_model):
+        eval_device = torch.device('cpu') if LOW_VRAM_MODE else DEVICE
+        pred_step1_ret = _predict_step1_returns(eval_model, X_test, eval_device)
+        actual_step1_ret = y_test_r[:, 0, :]
+
+        pred_ohlc_1 = np.zeros((len(test_starts), 4), dtype=np.float32)
+        for i in range(len(test_starts)):
+            pc = test_prev_close[i]
+            pred_ohlc_1[i] = [
+                pc * np.exp(pred_step1_ret[i, 0]),
+                pc * np.exp(pred_step1_ret[i, 1]),
+                pc * np.exp(pred_step1_ret[i, 2]),
+                pc * np.exp(pred_step1_ret[i, 3]),
+            ]
+            pred_ohlc_1[i] = enforce_candle_validity(pred_ohlc_1[i].reshape(1, -1))[0]
+
+        actual_ohlc_1 = price_vals[test_starts]
+        prev_ohlc = price_vals[test_starts - 1]
+        model_metrics = evaluate_metrics(actual_ohlc_1, pred_ohlc_1, test_prev_close)
+        baseline_metrics = evaluate_baselines(actual_ohlc_1, prev_ohlc, test_prev_close)
+        return model_metrics, baseline_metrics, actual_step1_ret
+
+    try:
+        hist = train_model(model, train_loader, val_loader, max_epochs, patience)
+
+        if quick_mode:
+            model_metrics, baseline_metrics, _ = _build_step1_metrics(model)
+            return {
+                'fold': fold_name,
+                'window': window,
+                'history_df': hist,
+                'model_metrics': model_metrics,
+                'baseline_metrics': baseline_metrics,
+                'context_df': None,
+                'actual_future_df': None,
+                'pred_future_df': None,
+                'ensemble_info': None,
+                'samples': {'train': len(X_train), 'val': len(X_val), 'test': len(X_test)},
+                'rag_database_size': 0,
+            }
+
+        rag_retriever = RAGPatternRetriever(
+            input_size=X_train.shape[-1],
+            embedding_dim=RAG_EMBEDDING_DIM,
+            k_retrieve=RAG_K_RETRIEVE,
+            hidden_size=RAG_ENCODER_HIDDEN,
+            num_layers=RAG_ENCODER_LAYERS,
+        ).to(RAG_DEVICE)
+        rag_limit = min(RAG_MAX_PATTERNS, len(X_train))
+        rag_retriever.build_database(
+            sequences=torch.from_numpy(X_train[:rag_limit]).float(),
+            future_paths=torch.from_numpy(y_train_r[:rag_limit]).float(),
+            batch_size=RAG_BUILD_BATCH_SIZE,
+        )
+        model.attach_retriever(rag_retriever)
+        rag_database_size = rag_retriever.database.size() if rag_retriever.database is not None else 0
+
+        last_idx = len(X_test) - 1
+        X_last = X_test[last_idx:last_idx+1]
+        context_start = int(test_starts[last_idx]) - window
+        context_prices = price_vals[context_start:int(test_starts[last_idx]), 3]
+
+        best_rets, ensemble_info = generate_ensemble_with_trend_selection(
+            model,
+            X_last,
+            context_prices,
+            temperature=SAMPLING_TEMPERATURE,
+            ensemble_size=ENSEMBLE_SIZE,
+            trend_lookback=TREND_LOOKBACK_BARS,
+        )
+
+        last_close = float(test_prev_close[last_idx])
+        pred_price_best = returns_to_prices_seq(best_rets, last_close)
+
+        all_price_paths = []
+        for path_rets in ensemble_info['all_paths']:
+            path_prices = returns_to_prices_seq(path_rets, last_close)
+            all_price_paths.append(path_prices)
+        ensemble_info['all_price_paths'] = all_price_paths
+
+        actual_future = price_vals[int(test_starts[last_idx]):int(test_starts[last_idx])+HORIZON]
+        model_metrics, baseline_metrics, actual_step1_ret = _build_step1_metrics(model)
+
+        print(f"\\nEnsemble prediction stats:")
+        print(f"  Pred range (best): [{pred_price_best[:, 3].min():.2f}, {pred_price_best[:, 3].max():.2f}]")
+        print(f"  Actual range: [{actual_future[:, 3].min():.2f}, {actual_future[:, 3].max():.2f}]")
+        print(f"  Pred volatility (best): {np.std(best_rets[:, 3]):.6f}")
+        print(f"  Actual volatility: {np.std(actual_step1_ret[:, 3]):.6f}")
+
+        future_idx = price_fold.index[test_starts[last_idx]:test_starts[last_idx]+HORIZON]
+        pred_future_df = pd.DataFrame(pred_price_best, index=future_idx, columns=OHLC_COLS)
+        actual_future_df = pd.DataFrame(actual_future, index=future_idx, columns=OHLC_COLS)
+        context_df = price_fold.iloc[test_starts[last_idx]-window:test_starts[last_idx]][OHLC_COLS]
+
+        return {
+            'fold': fold_name,
+            'window': window,
+            'history_df': hist,
+            'model_metrics': model_metrics,
+            'baseline_metrics': baseline_metrics,
+            'context_df': context_df,
+            'actual_future_df': actual_future_df,
+            'pred_future_df': pred_future_df,
+            'ensemble_info': ensemble_info,
+            'samples': {'train': len(X_train), 'val': len(X_val), 'test': len(X_test)},
+            'rag_database_size': rag_database_size,
+        }
+    finally:
+        try:
+            model = model.to('cpu')
+        except Exception:
+            pass
+        cuda_cleanup()
+"""
+
+
+V10_SWEEP_RUN_SRC = """
+# Run lookback sweep if enabled
+fold_results = []
+primary_slice = slices[0]
+selected_window = DEFAULT_LOOKBACK
+
+if ENABLE_LOOKBACK_SWEEP:
+    print('\\n=== Lookback sweep ===')
+    _, a0, b0 = primary_slice
+    fold_price0 = price_df.iloc[a0:b0].copy()
+
+    best_score = -float('inf')
+    for w in LOOKBACK_CANDIDATES:
+        print(f'\\nSweep candidate lookback={w} --')
+        try:
+            r = run_fold(f'sweep_w{w}', fold_price0, w, SWEEP_MAX_EPOCHS, SWEEP_PATIENCE, quick_mode=True)
+            score = -r['model_metrics']['close_mae']
+            if score > best_score:
+                best_score = score
+                selected_window = w
+        except Exception as e:
+            print(f"Failed for window {w}: {e}")
+            cuda_cleanup()
+
+print(f'\\nSelected lookback: {selected_window}')
+"""
+
+
+V10_FULL_RUN_SRC = """
+# Run full walk-forward with ensemble trend injection
+print('\\n=== Full walk-forward with ensemble trend injection ===')
+for i, (name, a, b) in enumerate(slices, start=1):
+    print(f'\\n=== Running {name} [{a}:{b}] lookback={selected_window} ===')
+    fold_price = price_df.iloc[a:b].copy()
+    try:
+        res = run_fold(name, fold_price, selected_window, FINAL_MAX_EPOCHS, FINAL_PATIENCE)
+        fold_results.append(res)
+
+        print(f"\\nResults for {name}:")
+        print(f"  Model MAE: {res['model_metrics']['close_mae']:.4f}")
+        print(f"  Persistence MAE: {res['baseline_metrics']['persistence']['close_mae']:.4f}")
+    except Exception as e:
+        print(f"Error in fold {name}: {e}")
+        cuda_cleanup()
+"""
+
+
 def apply_v10_stability_patches(nb: dict) -> None:
     base.replace_cell_source(nb, "SEED = 42", V10_DEVICE_SETUP_SRC, cell_type="code")
     base.replace_cell_source(nb, "# Model Configuration", V10_MODEL_CONFIG_SRC, cell_type="code")
@@ -808,10 +1057,18 @@ def apply_v10_stability_patches(nb: dict) -> None:
         "    ).to(DEVICE)\n\n\n    hist = train_model(model, train_loader, val_loader, max_epochs, patience)\n",
         "    ).to(DEVICE)\n    model.set_prediction_constraints(\n        target_constraints['clip_low'],\n        target_constraints['clip_high'],\n        target_constraints['sigma_cap'],\n    )\n\n    hist = train_model(model, train_loader, val_loader, max_epochs, patience)\n",
     )
+    run_fold_src = run_fold_src.replace(
+        "    hist = train_model(model, train_loader, val_loader, max_epochs, patience)\n\n    rag_retriever = RAGPatternRetriever(\n",
+        """    hist = train_model(model, train_loader, val_loader, max_epochs, patience)\n\n    def _predict_step1_returns(eval_model, X_input, eval_device):\n        eval_model = eval_model.to(eval_device)\n        eval_model.eval()\n        preds = []\n        with torch.no_grad():\n            for start in range(0, len(X_input), EVAL_BATCH_SIZE):\n                xb = torch.from_numpy(X_input[start:start + EVAL_BATCH_SIZE]).float().to(eval_device)\n                preds.append(eval_model(xb)[:, 0, :].detach().cpu().numpy())\n        if not preds:\n            return np.zeros((0, len(TARGET_COLS)), dtype=np.float32)\n        return np.concatenate(preds, axis=0)\n\n    if quick_mode:\n        eval_device = torch.device('cpu') if LOW_VRAM_MODE else DEVICE\n        pred_step1_ret = _predict_step1_returns(model, X_test, eval_device)\n        pred_ohlc_1 = np.zeros((len(test_starts), 4), dtype=np.float32)\n        for i in range(len(test_starts)):\n            pc = test_prev_close[i]\n            pred_ohlc_1[i] = [\n                pc * np.exp(pred_step1_ret[i, 0]),\n                pc * np.exp(pred_step1_ret[i, 1]),\n                pc * np.exp(pred_step1_ret[i, 2]),\n                pc * np.exp(pred_step1_ret[i, 3]),\n            ]\n            pred_ohlc_1[i] = enforce_candle_validity(pred_ohlc_1[i].reshape(1, -1))[0]\n\n        actual_ohlc_1 = price_vals[test_starts]\n        prev_ohlc = price_vals[test_starts - 1]\n        model_metrics = evaluate_metrics(actual_ohlc_1, pred_ohlc_1, test_prev_close)\n        baseline_metrics = evaluate_baselines(actual_ohlc_1, prev_ohlc, test_prev_close)\n\n        model = model.to('cpu')\n        cuda_cleanup()\n        return {\n            'fold': fold_name,\n            'window': window,\n            'history_df': hist,\n            'model_metrics': model_metrics,\n            'baseline_metrics': baseline_metrics,\n            'context_df': None,\n            'actual_future_df': None,\n            'pred_future_df': None,\n            'ensemble_info': None,\n            'samples': {'train': len(X_train), 'val': len(X_val), 'test': len(X_test)},\n            'rag_database_size': 0,\n        }\n\n    rag_retriever = RAGPatternRetriever(\n""",
+    )
     run_fold_src = run_fold_src.replace(".to(DEVICE)\n    rag_limit = min(RAG_MAX_PATTERNS, len(X_train))", ".to(RAG_DEVICE)\n    rag_limit = min(RAG_MAX_PATTERNS, len(X_train))")
     run_fold_src = run_fold_src.replace(
         "    rag_retriever.build_database(\n        sequences=torch.from_numpy(X_train[:rag_limit]).float(),\n        future_paths=torch.from_numpy(y_train_r[:rag_limit]).float(),\n    )\n",
         "    rag_retriever.build_database(\n        sequences=torch.from_numpy(X_train[:rag_limit]).float(),\n        future_paths=torch.from_numpy(y_train_r[:rag_limit]).float(),\n        batch_size=RAG_BUILD_BATCH_SIZE,\n    )\n",
+    )
+    run_fold_src = run_fold_src.replace(
+        "    # One-step metrics (deterministic for comparison)\n    mu_test = model(torch.from_numpy(X_test).float().to(DEVICE)).detach().cpu().numpy()\n    pred_step1_ret = mu_test[:, 0, :]\n    actual_step1_ret = y_test_r[:, 0, :]\n",
+        "    # One-step metrics (deterministic for comparison)\n    eval_device = torch.device('cpu') if LOW_VRAM_MODE else DEVICE\n    pred_step1_ret = _predict_step1_returns(model, X_test, eval_device)\n    actual_step1_ret = y_test_r[:, 0, :]\n",
     )
     run_fold_src = run_fold_src.replace("    actual_ohlc_1 = price_vals[test_starts + 1]\n    prev_ohlc = price_vals[test_starts]\n", "    actual_ohlc_1 = price_vals[test_starts]\n    prev_ohlc = price_vals[test_starts - 1]\n")
     run_fold_src = run_fold_src.replace("    context_df = price_fold.iloc[test_starts[last_idx]-window:test_starts[last_idx]+1][OHLC_COLS]\n", "    context_df = price_fold.iloc[test_starts[last_idx]-window:test_starts[last_idx]][OHLC_COLS]\n")
@@ -820,6 +1077,23 @@ def apply_v10_stability_patches(nb: dict) -> None:
         "    model = model.to('cpu')\n    cuda_cleanup()\n\n    return {\n",
     )
     base.replace_cell_source(nb, "def run_fold(", run_fold_src, cell_type="code")
+
+    sweep_src = base.cell_text(nb["cells"][base.find_cell_index(nb, "# Run lookback sweep if enabled", cell_type="code")])
+    sweep_src = sweep_src.replace(
+        '        except Exception as e:\n            print(f"Failed for window {w}: {e}")\n',
+        '        except Exception as e:\n            print(f"Failed for window {w}: {e}")\n            cuda_cleanup()\n',
+    )
+    base.replace_cell_source(nb, "# Run lookback sweep if enabled", sweep_src, cell_type="code")
+
+    full_run_src = base.cell_text(nb["cells"][base.find_cell_index(nb, "# Run full walk-forward with ensemble trend injection", cell_type="code")])
+    full_run_src = full_run_src.replace(
+        '    except Exception as e:\n        print(f"Error in fold {name}: {e}")\n',
+        '    except Exception as e:\n        print(f"Error in fold {name}: {e}")\n        cuda_cleanup()\n',
+    )
+    base.replace_cell_source(nb, "# Run full walk-forward with ensemble trend injection", full_run_src, cell_type="code")
+    base.replace_cell_source(nb, "def run_fold(", V10_RUN_FOLD_SRC, cell_type="code")
+    base.replace_cell_source(nb, "# Run lookback sweep if enabled", V10_SWEEP_RUN_SRC, cell_type="code")
+    base.replace_cell_source(nb, "# Run full walk-forward with ensemble trend injection", V10_FULL_RUN_SRC, cell_type="code")
 
     rolling_train_src = base.cell_text(nb["cells"][base.find_cell_index(nb, "def train_v7_model_for_rolling(", cell_type="code")])
     rolling_train_src = rolling_train_src.replace(
