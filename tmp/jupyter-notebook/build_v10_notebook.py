@@ -476,7 +476,9 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 GPU_TOTAL_MEM_GB = 0.0
 if torch.cuda.is_available():
     GPU_TOTAL_MEM_GB = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-LOW_VRAM_MODE = bool(torch.cuda.is_available() and GPU_TOTAL_MEM_GB <= 10.0)
+LOW_VRAM_MODE = bool(torch.cuda.is_available() and GPU_TOTAL_MEM_GB <= 12.0)
+ULTRA_LOW_VRAM_MODE = bool(torch.cuda.is_available() and GPU_TOTAL_MEM_GB <= 8.0)
+TRAIN_DEVICE = torch.device('cpu') if ULTRA_LOW_VRAM_MODE else DEVICE
 ROLLING_TRAIN_DEVICE = torch.device('cpu') if LOW_VRAM_MODE else DEVICE
 RAG_DEVICE = torch.device('cpu') if LOW_VRAM_MODE else DEVICE
 
@@ -489,7 +491,9 @@ if torch.cuda.is_available():
     print('GPU:', torch.cuda.get_device_name(0))
 print({
     'low_vram_mode': LOW_VRAM_MODE,
+    'ultra_low_vram_mode': ULTRA_LOW_VRAM_MODE,
     'gpu_total_mem_gb': round(GPU_TOTAL_MEM_GB, 2),
+    'train_device': str(TRAIN_DEVICE),
     'rolling_train_device': str(ROLLING_TRAIN_DEVICE),
     'rag_device': str(RAG_DEVICE),
 })
@@ -498,16 +502,16 @@ print({
 
 V10_MODEL_CONFIG_SRC = """
 # Model Configuration
-HIDDEN_SIZE = 256  # Increased for better generation capacity
-NUM_LAYERS = 2
-DROPOUT = 0.20     # Slightly higher for stochasticity
+HIDDEN_SIZE = 128 if LOW_VRAM_MODE else 256
+NUM_LAYERS = 1 if LOW_VRAM_MODE else 2
+DROPOUT = 0.15 if LOW_VRAM_MODE else 0.20
 LEARNING_RATE = 5e-4
 WEIGHT_DECAY = 1e-5
-BASE_BATCH_SIZE = 256
-BATCH_SIZE = 32 if LOW_VRAM_MODE else BASE_BATCH_SIZE
-ROLLING_TRAIN_BATCH_SIZE = 16 if LOW_VRAM_MODE else min(128, BASE_BATCH_SIZE)
-BASE_EVAL_BATCH_SIZE = 256
-EVAL_BATCH_SIZE = 32 if LOW_VRAM_MODE else BASE_EVAL_BATCH_SIZE
+BASE_BATCH_SIZE = 128
+BATCH_SIZE = 16 if LOW_VRAM_MODE else BASE_BATCH_SIZE
+ROLLING_TRAIN_BATCH_SIZE = 8 if LOW_VRAM_MODE else min(64, BASE_BATCH_SIZE)
+BASE_EVAL_BATCH_SIZE = 128
+EVAL_BATCH_SIZE = 16 if LOW_VRAM_MODE else BASE_EVAL_BATCH_SIZE
 """
 
 
@@ -526,8 +530,8 @@ TF_DECAY_RATE = 0.95
 V10_INFERENCE_CONFIG_SRC = """
 # Inference Configuration - tuned for realistic 1-minute bars
 SAMPLING_TEMPERATURE = 0.50
-BASE_ENSEMBLE_SIZE = 16
-ENSEMBLE_SIZE = 8 if LOW_VRAM_MODE else BASE_ENSEMBLE_SIZE
+BASE_ENSEMBLE_SIZE = 12
+ENSEMBLE_SIZE = 4 if LOW_VRAM_MODE else BASE_ENSEMBLE_SIZE
 TREND_LOOKBACK_BARS = 20
 STRONG_TREND_THRESHOLD = 0.002
 VOLATILITY_SCALING = True
@@ -542,11 +546,11 @@ V10_PHASE5_RAG_CONFIG_SRC = """
 RAG_EMBEDDING_DIM = 64
 RAG_K_RETRIEVE = 5
 RAG_BLEND_WEIGHT = 0.25
-RAG_MAX_PATTERNS = 3000 if LOW_VRAM_MODE else 4000
-ROLLING_RAG_MAX_PATTERNS = 1500 if LOW_VRAM_MODE else RAG_MAX_PATTERNS
-RAG_ENCODER_HIDDEN = 128
-RAG_ENCODER_LAYERS = 2
-RAG_BUILD_BATCH_SIZE = 32 if LOW_VRAM_MODE else 128
+RAG_MAX_PATTERNS = 1200 if LOW_VRAM_MODE else 4000
+ROLLING_RAG_MAX_PATTERNS = 600 if LOW_VRAM_MODE else RAG_MAX_PATTERNS
+RAG_ENCODER_HIDDEN = 64 if LOW_VRAM_MODE else 128
+RAG_ENCODER_LAYERS = 1 if LOW_VRAM_MODE else 2
+RAG_BUILD_BATCH_SIZE = 16 if LOW_VRAM_MODE else 128
 """
 
 
@@ -656,7 +660,7 @@ def tf_ratio_for_epoch(epoch):
 def run_epoch(model, loader, step_weights_t, optimizer=None, tf_ratio=0.0, device=None):
     is_train = optimizer is not None
     model.train(is_train)
-    device = DEVICE if device is None else torch.device(device)
+    device = TRAIN_DEVICE if device is None else torch.device(device)
 
     total_loss, nll_total, range_total, vol_total, dir_total = 0, 0, 0, 0, 0
     n_items = 0
@@ -708,7 +712,7 @@ def run_epoch(model, loader, step_weights_t, optimizer=None, tf_ratio=0.0, devic
 
 V10_TRAIN_MODEL_SRC = """
 def train_model(model, train_loader, val_loader, max_epochs, patience, device=None):
-    device = DEVICE if device is None else torch.device(device)
+    device = TRAIN_DEVICE if device is None else torch.device(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, min_lr=1e-6)
 
@@ -820,7 +824,7 @@ def run_fold(fold_name, price_fold, window, max_epochs, patience, run_sanity=Fal
         num_layers=NUM_LAYERS,
         dropout=DROPOUT,
         horizon=HORIZON,
-    ).to(DEVICE)
+    ).to(TRAIN_DEVICE)
     model.set_prediction_constraints(
         target_constraints['clip_low'],
         target_constraints['clip_high'],
@@ -862,7 +866,11 @@ def run_fold(fold_name, price_fold, window, max_epochs, patience, run_sanity=Fal
         return model_metrics, baseline_metrics, actual_step1_ret
 
     try:
-        hist = train_model(model, train_loader, val_loader, max_epochs, patience)
+        hist = train_model(model, train_loader, val_loader, max_epochs, patience, device=TRAIN_DEVICE)
+
+        if LOW_VRAM_MODE and TRAIN_DEVICE.type == 'cuda':
+            model = model.to('cpu')
+            cuda_cleanup()
 
         if quick_mode:
             model_metrics, baseline_metrics, _ = _build_step1_metrics(model)
@@ -978,6 +986,8 @@ if ENABLE_LOOKBACK_SWEEP:
         except Exception as e:
             print(f"Failed for window {w}: {e}")
             cuda_cleanup()
+else:
+    print('\\nLookback sweep disabled in low-VRAM mode; using DEFAULT_LOOKBACK.')
 
 print(f'\\nSelected lookback: {selected_window}')
 """
@@ -1145,9 +1155,9 @@ INPUT_EXTRA_COL = 'imputedFracWindow'
 HORIZON = 50
 TRAIN_RATIO = 0.70
 VAL_RATIO = 0.15
-LOOKBACK_CANDIDATES = [64, 96, 160, 256]
-DEFAULT_LOOKBACK = 96
-ENABLE_LOOKBACK_SWEEP = True
+LOOKBACK_CANDIDATES = [64, 96] if LOW_VRAM_MODE else [64, 96, 160, 256]
+DEFAULT_LOOKBACK = 64 if LOW_VRAM_MODE else 96
+ENABLE_LOOKBACK_SWEEP = not LOW_VRAM_MODE
 SKIP_OPEN_BARS_TARGET = 6
 """
 
@@ -1170,14 +1180,14 @@ SKIP_OPEN_BARS_TARGET = 6
             base.code_cell(
                 """
 # Integrated architecture configuration
-D_MODEL = 128
-N_HEADS = 8
-N_LAYERS = 2
-USE_FREQUENCY = True
-FREQ_N_FFT = 16
-FREQ_HOP_LENGTH = 4
-FREQ_OUT_CHANNELS = 64
-MULTISCALE_N_FFTS = [8, 16, 32]
+D_MODEL = 64 if LOW_VRAM_MODE else 128
+N_HEADS = 4 if LOW_VRAM_MODE else 8
+N_LAYERS = 1 if LOW_VRAM_MODE else 2
+USE_FREQUENCY = not LOW_VRAM_MODE
+FREQ_N_FFT = 8 if LOW_VRAM_MODE else 16
+FREQ_HOP_LENGTH = 2 if LOW_VRAM_MODE else 4
+FREQ_OUT_CHANNELS = 32 if LOW_VRAM_MODE else 64
+MULTISCALE_N_FFTS = [8, 16] if LOW_VRAM_MODE else [8, 16, 32]
 """
             )
         ],
