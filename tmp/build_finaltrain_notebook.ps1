@@ -2120,5 +2120,9 @@ $notebook = @{
 }
 
 $outputPath = Join-Path $PWD "FinalTrain.ipynb"
-$notebook | ConvertTo-Json -Depth 100 | Set-Content -Path $outputPath -Encoding utf8
+[System.IO.File]::WriteAllText(
+    $outputPath,
+    ($notebook | ConvertTo-Json -Depth 100),
+    (New-Object System.Text.UTF8Encoding($false))
+)
 Write-Output "Wrote $outputPath"
