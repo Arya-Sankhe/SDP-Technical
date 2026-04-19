@@ -36,7 +36,41 @@ The output of this notebook is a frozen artifact tree under `output/final_artifa
 '@
 
 $cells += New-CodeCell @'
-%pip install -q alpaca-py pandas-market-calendars pyarrow torch torchvision torchaudio numpy pandas matplotlib tqdm
+import importlib
+import subprocess
+import sys
+
+REQUIRED_PACKAGES = {
+    "alpaca.data": "alpaca-py",
+    "pandas_market_calendars": "pandas-market-calendars",
+    "pyarrow": "pyarrow",
+    "numpy": "numpy",
+    "pandas": "pandas",
+    "matplotlib": "matplotlib",
+    "tqdm": "tqdm",
+}
+
+
+def module_available(module_name: str) -> bool:
+    try:
+        importlib.import_module(module_name)
+        return True
+    except Exception:
+        return False
+
+
+missing = [package for module_name, package in REQUIRED_PACKAGES.items() if not module_available(module_name)]
+if missing:
+    print(f"Installing missing packages: {missing}")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", *missing])
+else:
+    print("Required packages already available.")
+
+if not module_available("torch"):
+    print("Installing missing package: torch")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "torch"])
+else:
+    print("torch already available.")
 '@
 
 $cells += New-CodeCell @'
