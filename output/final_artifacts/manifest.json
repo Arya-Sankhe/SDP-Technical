@@ -1,6 +1,6 @@
 {
   "runtime": {
-    "created_at_utc": "2026-04-20T11:44:56Z",
+    "created_at_utc": "2026-04-20T15:00:59Z",
     "symbol": "MSFT",
     "device": "cuda",
     "gpu_mem_gb": 8.0,
@@ -58,6 +58,21 @@
       "metrics_path": "output\\final_artifacts\\models\\v9_2\\metrics.json",
       "history_path": "output\\final_artifacts\\models\\v9_2\\history.csv",
       "rolling_predictions_path": "output\\final_artifacts\\models\\v9_2\\rolling_predictions.npz"
+    },
+    "v9_5": {
+      "version": "v9.5",
+      "dir": "output\\final_artifacts\\models\\v9_5",
+      "lookback": 256,
+      "feature_mode": "core",
+      "architecture": "gru_rag",
+      "model_path": "output\\final_artifacts\\models\\v9_5\\model.pt",
+      "scaler_path": "output\\final_artifacts\\models\\v9_5\\scaler.npz",
+      "feature_manifest_path": "output\\final_artifacts\\models\\v9_5\\feature_manifest.json",
+      "train_config_path": "output\\final_artifacts\\models\\v9_5\\train_config.json",
+      "inference_config_path": "output\\final_artifacts\\models\\v9_5\\inference_config.json",
+      "metrics_path": "output\\final_artifacts\\models\\v9_5\\metrics.json",
+      "history_path": "output\\final_artifacts\\models\\v9_5\\history.csv",
+      "rolling_predictions_path": "output\\final_artifacts\\models\\v9_5\\rolling_predictions.npz"
     }
   },
   "ensemble": {

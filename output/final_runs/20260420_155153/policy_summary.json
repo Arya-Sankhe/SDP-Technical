@@ -1,0 +1,20 @@
+{
+  "summary": {
+    "raw_action": 0.9970451593399048,
+    "policy_std": 0.9463307857513428,
+    "confidence_score": 0.5137872797988805,
+    "critic_value_estimate": 0.18878687918186188,
+    "aggregate_regime_name": "NORMAL",
+    "regime_scale": 1.0,
+    "recommended_position_pct": 0.9970451593399048,
+    "stance": "LONG"
+  },
+  "portfolio_state": {
+    "cash_norm": 1.0,
+    "shares_norm": 0.0,
+    "portfolio_value_norm": 1.0,
+    "position_pct": 0.0
+  },
+  "run_label": "20260420_155153",
+  "symbol": "MSFT"
+}

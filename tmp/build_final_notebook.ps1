@@ -32,7 +32,7 @@ $cells += New-MarkdownCell @'
 
 This notebook is the inference-only side of the final workflow. It expects `FinalTrain.ipynb` to have already created `output/final_artifacts/manifest.json` plus all forecast checkpoints, scaler stats, feature manifests, ensemble weights, and PPO artifacts.
 
-The notebook loads those frozen artifacts, fetches the latest market data, runs the five forecast experts one at a time, shows each expert prediction, builds the weighted aggregate forecast, and then runs the saved `v9.6` decision layer on top.
+The notebook loads those frozen artifacts, fetches the latest market data, runs the forecast experts one at a time, shows each expert prediction, builds the weighted aggregate forecast, runs the saved `v9.6` decision layer on top, and includes a one-day strictly causal rolling backtest driven by the frozen ensemble.
 '@
 
 $cells += New-CodeCell @'
@@ -95,8 +95,9 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from IPython.display import display
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib import pyplot as plt
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Patch, Rectangle
 from tqdm import tqdm
 '@
 
@@ -122,6 +123,13 @@ MAX_REQUESTS_PER_MINUTE = 120
 MAX_RETRIES = 5
 ACTION_NEUTRAL_BAND = 0.10
 SAVE_RUN_OUTPUTS = True
+FINAL_ROLLING_START_TIME = "09:30"
+FINAL_ROLLING_END_TIME = "16:00"
+FINAL_ROLLING_STEP = 1
+FINAL_ROLLING_BACKTEST_DATE = None
+FINAL_ROLLING_HISTORY_BARS = 220
+FINAL_ROLLING_SAVE_FRAMES = False
+FINAL_ROLLING_DISPLAY_FRAME_INDEX = -1
 
 TARGET_COLUMNS = ["rOpen", "rHigh", "rLow", "rClose"]
 CORE_FEATURE_COLUMNS = [
@@ -209,6 +217,7 @@ print(
         "manifest_path": str(MANIFEST_PATH),
         "run_label": RUN_LABEL,
         "save_run_outputs": SAVE_RUN_OUTPUTS,
+        "final_rolling_save_frames": FINAL_ROLLING_SAVE_FRAMES,
     }
 )
 '@
@@ -253,6 +262,10 @@ def to_serializable(value: Any) -> Any:
 
 def save_json(path: Path, payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(to_serializable(payload), indent=2), encoding="utf-8")
+
+
+def save_npz(path: Path, **arrays: Any) -> None:
+    np.savez_compressed(path, **arrays)
 
 
 def save_dataframe(df: pd.DataFrame, path: Path) -> None:
@@ -982,16 +995,18 @@ def blend_retrieved_future(generated_returns: np.ndarray, retrieved_future: Opti
     return ((1.0 - blend_weight) * generated_returns + blend_weight * retrieved_future).astype(np.float32)
 
 
-def build_latest_input(feature_df: pd.DataFrame, bundle: LoadedExpertBundle) -> Dict[str, Any]:
-    if len(feature_df) < bundle.lookback:
-        raise RuntimeError(f"Not enough rows to build input for {bundle.expert_name}")
-    context = feature_df.iloc[-bundle.lookback :].copy()
+def build_anchor_input(feature_df: pd.DataFrame, bundle: LoadedExpertBundle, anchor_index: int) -> Dict[str, Any]:
+    if anchor_index < bundle.lookback:
+        raise RuntimeError(f"Not enough rows to build input for {bundle.expert_name} at anchor {anchor_index}")
+    if anchor_index >= len(feature_df):
+        raise IndexError(f"Anchor index out of range for {bundle.expert_name}: {anchor_index}")
+    context = feature_df.iloc[anchor_index - bundle.lookback : anchor_index].copy()
     feature_block = context.loc[:, bundle.feature_columns].to_numpy(dtype=np.float32)
     impute_frac = float(context["row_imputed"].mean())
     feature_block = np.concatenate([feature_block, np.full((bundle.lookback, 1), impute_frac, dtype=np.float32)], axis=1)
     scaled = apply_input_scaler(feature_block[None, ...], bundle.scaler)[0]
-    anchor_prev_close = float(context["close"].iloc[-1])
-    anchor_timestamp = pd.Timestamp(context["timestamp"].iloc[-1])
+    anchor_prev_close = float(feature_df["prev_close"].iloc[anchor_index]) if "prev_close" in feature_df.columns else float(context["close"].iloc[-1])
+    anchor_timestamp = pd.Timestamp(feature_df["timestamp"].iloc[anchor_index])
     return {
         "scaled_input": scaled,
         "anchor_prev_close": anchor_prev_close,
@@ -999,6 +1014,12 @@ def build_latest_input(feature_df: pd.DataFrame, bundle: LoadedExpertBundle) -> 
         "historical_closes": context["close"].to_numpy(dtype=np.float32),
         "context": context,
     }
+
+
+def build_latest_input(feature_df: pd.DataFrame, bundle: LoadedExpertBundle) -> Dict[str, Any]:
+    if len(feature_df) < bundle.lookback + 1:
+        raise RuntimeError(f"Not enough rows to build latest input for {bundle.expert_name}")
+    return build_anchor_input(feature_df, bundle, len(feature_df) - 1)
 
 
 def generate_ensemble_with_trend_selection(bundle: LoadedExpertBundle, model_input: Dict[str, Any], temperature: float, regime_multiplier: float = 1.0) -> np.ndarray:
@@ -1261,6 +1282,496 @@ plt.show()
 plot_aggregate_candles(aggregate_path, f"{SYMBOL} Aggregate OHLC Forecast")
 '@
 
+$cells += New-MarkdownCell @'
+## One-Day Rolling Backtest
+
+This section replays one full intraday session strictly causally using the frozen expert artifacts. For each anchor time, every expert predicts from its own feature block, the saved ensemble weights form the aggregate OHLC candle path, and the individual expert paths are shown as close-line overlays.
+'@
+
+$cells += New-CodeCell @'
+FINAL_ROLLING_FRAME_OUTPUT_DIR = FINAL_RUN_DIR / "rolling_frames"
+MAX_ROLLING_LOOKBACK = max(int(MODEL_ARTIFACTS[expert_name]["lookback"]) for expert_name in EXPECTED_EXPERTS)
+
+print(
+    {
+        "final_rolling_start_time": FINAL_ROLLING_START_TIME,
+        "final_rolling_end_time": FINAL_ROLLING_END_TIME,
+        "final_rolling_step": FINAL_ROLLING_STEP,
+        "final_rolling_backtest_date": FINAL_ROLLING_BACKTEST_DATE,
+        "final_rolling_history_bars": FINAL_ROLLING_HISTORY_BARS,
+        "final_rolling_save_frames": FINAL_ROLLING_SAVE_FRAMES,
+        "max_rolling_lookback": MAX_ROLLING_LOOKBACK,
+    }
+)
+'@
+
+$cells += New-CodeCell @'
+@dataclass
+class FinalRollingLog:
+    anchor_index: int
+    anchor_timestamp: pd.Timestamp
+    future_timestamps: List[pd.Timestamp]
+    anchor_prev_close: float
+    actual_path: np.ndarray
+    aggregate_path: np.ndarray
+    expert_paths: Dict[str, np.ndarray]
+    aggregate_regime_indicator: float
+    temperatures: Dict[str, float]
+
+
+def _intraday_positions_for_session(session_df: pd.DataFrame, session_date: str, start_time: str, end_time: str) -> np.ndarray:
+    st = pd.Timestamp(start_time).time()
+    et = pd.Timestamp(end_time).time()
+    times = session_df["timestamp_ny"].dt.time
+    date_mask = session_df["session_date"].to_numpy() == session_date
+    time_mask = np.asarray([(value >= st) and (value < et) for value in times], dtype=bool)
+    return np.where(date_mask & time_mask)[0]
+
+
+def select_final_rolling_backtest_date(session_df: pd.DataFrame, requested: Optional[str], max_lookback: int, horizon: int) -> str:
+    dates = session_df["session_date"].drop_duplicates().tolist()
+
+    def _validate(date_str: str, raise_on_error: bool = False) -> Optional[str]:
+        positions = _intraday_positions_for_session(session_df, date_str, FINAL_ROLLING_START_TIME, FINAL_ROLLING_END_TIME)
+        if len(positions) < 390:
+            message = f"Backtest date {date_str} does not have a full intraday session."
+            if raise_on_error:
+                raise ValueError(message)
+            return None
+        if positions[0] < max_lookback:
+            message = f"Backtest date {date_str} does not have enough prior bars for lookback={max_lookback}."
+            if raise_on_error:
+                raise ValueError(message)
+            return None
+        last_anchor = positions[-1] - horizon
+        if max(positions[0] + SESSION_OPEN_SKIP_BARS, max_lookback) > last_anchor:
+            message = f"Backtest date {date_str} does not leave enough room for horizon={horizon}."
+            if raise_on_error:
+                raise ValueError(message)
+            return None
+        return date_str
+
+    if requested is not None:
+        validated = _validate(requested, raise_on_error=True)
+        if validated is None:
+            raise RuntimeError(f"Could not validate requested backtest date: {requested}")
+        return validated
+
+    for date_str in reversed(dates):
+        validated = _validate(date_str, raise_on_error=False)
+        if validated is not None:
+            return validated
+
+    raise RuntimeError("Could not auto-select a valid one-day rolling backtest date.")
+
+
+def build_final_rolling_anchor_indices(session_df: pd.DataFrame, backtest_date: str, max_lookback: int, horizon: int, step: int) -> np.ndarray:
+    positions = _intraday_positions_for_session(session_df, backtest_date, FINAL_ROLLING_START_TIME, FINAL_ROLLING_END_TIME)
+    if len(positions) == 0:
+        raise RuntimeError(f"No intraday positions found for {backtest_date}")
+    first_anchor = max(int(positions[0]) + SESSION_OPEN_SKIP_BARS, max_lookback)
+    last_anchor = int(positions[-1]) - horizon
+    if first_anchor > last_anchor:
+        raise RuntimeError(f"No valid rolling anchors for {backtest_date}")
+    return np.arange(first_anchor, last_anchor + 1, step, dtype=np.int32)
+
+
+def build_actual_paths_for_anchor_indices(feature_df: pd.DataFrame, anchor_indices: np.ndarray) -> Dict[str, Any]:
+    timestamps: List[pd.Timestamp] = []
+    future_timestamps: List[List[pd.Timestamp]] = []
+    prev_close: List[float] = []
+    actual_paths: List[np.ndarray] = []
+
+    for anchor_index in anchor_indices:
+        timestamps.append(pd.Timestamp(feature_df["timestamp"].iloc[anchor_index]))
+        prev_close_value = float(feature_df["prev_close"].iloc[anchor_index])
+        prev_close.append(prev_close_value)
+        future_slice = feature_df.iloc[anchor_index : anchor_index + HORIZON]
+        future_timestamps.append([pd.Timestamp(ts) for ts in future_slice["timestamp"].tolist()])
+        actual_returns = future_slice.loc[:, TARGET_COLUMNS].to_numpy(dtype=np.float32)
+        actual_paths.append(returns_to_prices_seq(prev_close_value, actual_returns))
+
+    return {
+        "anchor_timestamps": timestamps,
+        "future_timestamps": future_timestamps,
+        "prev_close": np.asarray(prev_close, dtype=np.float32),
+        "actual_paths": np.stack(actual_paths).astype(np.float32),
+    }
+
+
+def run_final_rolling_for_bundle(expert_name: str, anchor_indices: np.ndarray) -> Dict[str, Any]:
+    bundle = load_expert_bundle(expert_name)
+    feature_df = FEATURE_FRAMES[bundle.feature_mode]
+    predicted_paths: List[np.ndarray] = []
+    regime_indicators: List[float] = []
+    temperatures: List[float] = []
+
+    for anchor_index in tqdm(anchor_indices, desc=f"{bundle.version} final rolling"):
+        model_input = build_anchor_input(feature_df, bundle, int(anchor_index))
+        regime_name = "NORMAL"
+        regime_indicator = 0.0
+        regime_multiplier = 1.0
+        if bundle.feature_mode == "regime":
+            recent_history = feature_df.iloc[max(0, int(anchor_index) - 390) : int(anchor_index)].copy()
+            regime_name, regime_multiplier, regime_indicator = detect_regime_multiplier(recent_history)
+
+        base_temperature = float(bundle.inference_config["sampling_temperature"])
+        time_temperature = intraday_temperature(model_input["anchor_timestamp"])
+        effective_temperature = base_temperature * (time_temperature / 1.5)
+
+        predicted_path = generate_ensemble_with_trend_selection(
+            bundle=bundle,
+            model_input=model_input,
+            temperature=effective_temperature,
+            regime_multiplier=regime_multiplier,
+        )
+
+        predicted_paths.append(predicted_path)
+        regime_indicators.append(float(regime_indicator))
+        temperatures.append(float(effective_temperature * regime_multiplier))
+
+    result = {
+        "expert": expert_name,
+        "version": bundle.version,
+        "lookback": bundle.lookback,
+        "feature_mode": bundle.feature_mode,
+        "architecture": bundle.architecture,
+        "predicted_paths": np.stack(predicted_paths).astype(np.float32),
+        "regime_indicators": np.asarray(regime_indicators, dtype=np.float32),
+        "temperatures": np.asarray(temperatures, dtype=np.float32),
+    }
+
+    del bundle.model
+    clear_torch_memory()
+    return result
+
+
+def build_final_rolling_logs(
+    anchor_indices: np.ndarray,
+    actual_payload: Dict[str, Any],
+    expert_outputs: Dict[str, Dict[str, Any]],
+) -> List[FinalRollingLog]:
+    logs: List[FinalRollingLog] = []
+    for offset, anchor_index in enumerate(anchor_indices):
+        aggregate_raw = np.zeros((HORIZON, 4), dtype=np.float32)
+        aggregate_regime_indicator = 0.0
+        expert_paths: Dict[str, np.ndarray] = {}
+        temperatures: Dict[str, float] = {}
+        for expert_name in EXPECTED_EXPERTS:
+            expert_path = expert_outputs[expert_name]["predicted_paths"][offset]
+            expert_paths[expert_name] = expert_path
+            temperatures[expert_name] = float(expert_outputs[expert_name]["temperatures"][offset])
+            aggregate_raw += float(ensemble_weights[expert_name]) * expert_path
+            aggregate_regime_indicator += float(ensemble_weights[expert_name]) * float(expert_outputs[expert_name]["regime_indicators"][offset])
+
+        logs.append(
+            FinalRollingLog(
+                anchor_index=int(anchor_index),
+                anchor_timestamp=actual_payload["anchor_timestamps"][offset],
+                future_timestamps=actual_payload["future_timestamps"][offset],
+                anchor_prev_close=float(actual_payload["prev_close"][offset]),
+                actual_path=actual_payload["actual_paths"][offset],
+                aggregate_path=enforce_candle_validity(aggregate_raw),
+                expert_paths=expert_paths,
+                aggregate_regime_indicator=float(aggregate_regime_indicator),
+                temperatures=temperatures,
+            )
+        )
+    return logs
+
+
+def summarize_final_rolling_logs(logs: List[FinalRollingLog]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    summary_rows: List[Dict[str, Any]] = []
+    next_close_rows: List[Dict[str, Any]] = []
+
+    for log in logs:
+        pred_close = log.aggregate_path[:, 3]
+        actual_close = log.actual_path[:, 3]
+        direction_hit = bool(np.sign(pred_close[0] - log.anchor_prev_close) == np.sign(actual_close[0] - log.anchor_prev_close))
+        row = {
+            "anchor_timestamp": log.anchor_timestamp,
+            "anchor_prev_close": log.anchor_prev_close,
+            "aggregate_regime_indicator": float(log.aggregate_regime_indicator),
+            "aggregate_regime_name": regime_name_from_indicator(log.aggregate_regime_indicator),
+            "direction_hit": float(direction_hit),
+            "path_mae": float(np.mean(np.abs(pred_close - actual_close))),
+        }
+        for step in [1, 5, 10, 15]:
+            row[f"step_{step}_close_mae"] = float(abs(pred_close[step - 1] - actual_close[step - 1]))
+        summary_rows.append(row)
+
+        next_close_row = {
+            "anchor_timestamp": log.anchor_timestamp,
+            "actual_next_close": float(actual_close[0]),
+            "aggregate_next_close": float(pred_close[0]),
+        }
+        for expert_name, expert_path in log.expert_paths.items():
+            next_close_row[f"{expert_name}_next_close"] = float(expert_path[0, 3])
+        next_close_rows.append(next_close_row)
+
+    summary_df = pd.DataFrame(summary_rows)
+    next_close_df = pd.DataFrame(next_close_rows)
+    metrics_df = pd.DataFrame(
+        [
+            {"metric": "prediction_count", "value": int(len(summary_df))},
+            {"metric": "directional_hit_rate_t1", "value": float(summary_df["direction_hit"].mean())},
+            {"metric": "aggregate_path_mae", "value": float(summary_df["path_mae"].mean())},
+            {"metric": "aggregate_step_1_close_mae", "value": float(summary_df["step_1_close_mae"].mean())},
+            {"metric": "aggregate_step_5_close_mae", "value": float(summary_df["step_5_close_mae"].mean())},
+            {"metric": "aggregate_step_10_close_mae", "value": float(summary_df["step_10_close_mae"].mean())},
+            {"metric": "aggregate_step_15_close_mae", "value": float(summary_df["step_15_close_mae"].mean())},
+        ]
+    )
+    return summary_df, metrics_df, next_close_df
+
+
+def _rolling_candle_frame(ohlc_values: np.ndarray, timestamps: Sequence[pd.Timestamp]) -> pd.DataFrame:
+    return pd.DataFrame(ohlc_values, columns=["Open", "High", "Low", "Close"], index=pd.Index(timestamps))
+
+
+def _draw_rolling_candles(
+    ax,
+    ohlc_df: pd.DataFrame,
+    start_x: int,
+    up_edge: str,
+    up_face: str,
+    down_edge: str,
+    down_face: str,
+    wick_color: str,
+    width: float = 0.58,
+    lw: float = 1.0,
+    alpha: float = 1.0,
+    zorder: int = 3,
+) -> None:
+    values = ohlc_df[["Open", "High", "Low", "Close"]].to_numpy(dtype=np.float32)
+    for idx, (open_price, high_price, low_price, close_price) in enumerate(values):
+        x_value = start_x + idx
+        bull = close_price >= open_price
+        ax.vlines(x_value, low_price, high_price, color=wick_color, linewidth=lw, alpha=alpha, zorder=zorder - 1)
+        body_low = min(open_price, close_price)
+        body_height = max(abs(close_price - open_price), 1e-6)
+        rect = Rectangle(
+            (x_value - width / 2, body_low),
+            width,
+            body_height,
+            facecolor=up_face if bull else down_face,
+            edgecolor=up_edge if bull else down_edge,
+            linewidth=lw,
+            alpha=alpha,
+            zorder=zorder,
+        )
+        ax.add_patch(rect)
+
+
+def render_final_rolling_frame(log: FinalRollingLog, pricedf: pd.DataFrame, history_bars: int = FINAL_ROLLING_HISTORY_BARS) -> plt.Figure:
+    history_start = max(0, log.anchor_index - history_bars)
+    history_df = pricedf.iloc[history_start : log.anchor_index][["timestamp", "open", "high", "low", "close"]].copy()
+    history_ohlc = history_df.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"}).set_index("timestamp")
+    actual_ohlc = _rolling_candle_frame(log.actual_path, log.future_timestamps)
+    aggregate_ohlc = _rolling_candle_frame(log.aggregate_path, log.future_timestamps)
+
+    fig, ax = plt.subplots(figsize=(18, 8), facecolor="black")
+    FigureCanvasAgg(fig)
+    ax.set_facecolor("black")
+
+    _draw_rolling_candles(
+        ax,
+        history_ohlc,
+        0,
+        up_edge="#00FF00",
+        up_face="#00FF00",
+        down_edge="#FF0000",
+        down_face="#FF0000",
+        wick_color="#D0D0D0",
+        width=0.60,
+        lw=1.0,
+        alpha=0.95,
+        zorder=3,
+    )
+
+    future_start_x = len(history_ohlc)
+    _draw_rolling_candles(
+        ax,
+        actual_ohlc,
+        future_start_x,
+        up_edge="#1D6F42",
+        up_face="#1D6F42",
+        down_edge="#8E2F25",
+        down_face="#8E2F25",
+        wick_color="#8E8E8E",
+        width=0.58,
+        lw=0.9,
+        alpha=0.40,
+        zorder=2,
+    )
+    _draw_rolling_candles(
+        ax,
+        aggregate_ohlc,
+        future_start_x,
+        up_edge="#FFFFFF",
+        up_face="#FFFFFF",
+        down_edge="#FFFFFF",
+        down_face="#000000",
+        wick_color="#F3F3F3",
+        width=0.50,
+        lw=1.2,
+        alpha=1.0,
+        zorder=4,
+    )
+
+    color_map = plt.cm.tab10(np.linspace(0, 1, max(len(log.expert_paths), 1)))
+    line_handles = []
+    for idx, expert_name in enumerate(EXPECTED_EXPERTS):
+        expert_path = log.expert_paths[expert_name]
+        close_values = expert_path[:, 3]
+        x_values = np.arange(len(close_values)) + future_start_x
+        handle, = ax.plot(
+            x_values,
+            close_values,
+            color=color_map[idx % len(color_map)],
+            linewidth=1.15,
+            alpha=0.85,
+            zorder=5,
+            label=expert_name,
+        )
+        line_handles.append(handle)
+
+    now_x = len(history_ohlc) - 0.5
+    ax.axvline(now_x, color="white", linestyle="--", linewidth=1.0, alpha=0.85, zorder=6)
+
+    full_index = history_ohlc.index.append(actual_ohlc.index)
+    tick_step = max(1, len(full_index) // 10)
+    ticks = list(range(0, len(full_index), tick_step))
+    if ticks[-1] != len(full_index) - 1:
+        ticks.append(len(full_index) - 1)
+    labels = [pd.Timestamp(full_index[i]).strftime("%H:%M") for i in ticks]
+
+    ax.set_xticks(ticks)
+    ax.set_xticklabels(labels, rotation=25, ha="right", color="white", fontsize=9)
+    ax.tick_params(axis="y", colors="white")
+    for spine in ax.spines.values():
+        spine.set_color("#666666")
+    ax.grid(color="#242424", linewidth=0.6, alpha=0.35)
+
+    header = (
+        f"{SYMBOL} 1m Final Rolling | Anchor: {log.anchor_timestamp.tz_convert(SESSION_TZ).strftime('%I:%M %p').lstrip('0')} | "
+        f"Regime: {regime_name_from_indicator(log.aggregate_regime_indicator)}"
+    )
+    ax.set_title(header, color="white", pad=12)
+    ax.set_ylabel("Price", color="white")
+
+    legend_handles = [
+        Patch(facecolor="#00FF00", edgecolor="#00FF00", label="History (bull)"),
+        Patch(facecolor="#FF0000", edgecolor="#FF0000", label="History (bear)"),
+        Patch(facecolor="#1D6F42", edgecolor="#1D6F42", label="Actual Future (dim bull)"),
+        Patch(facecolor="#8E2F25", edgecolor="#8E2F25", label="Actual Future (dim bear)"),
+        Patch(facecolor="#FFFFFF", edgecolor="#FFFFFF", label="Aggregate (bull)"),
+        Patch(facecolor="#000000", edgecolor="#FFFFFF", label="Aggregate (bear)"),
+    ] + line_handles
+    legend = ax.legend(handles=legend_handles, facecolor="black", edgecolor="#666666", loc="upper left", ncol=2)
+    for text in legend.get_texts():
+        text.set_color("white")
+
+    plt.tight_layout()
+    return fig
+
+
+def generate_final_rolling_frames(logs: List[FinalRollingLog], pricedf: pd.DataFrame, output_dir: Path) -> List[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    saved_paths: List[Path] = []
+    total = len(logs)
+    for idx, log in enumerate(tqdm(logs, desc="Saving final rolling frames")):
+        fig = render_final_rolling_frame(log, pricedf, history_bars=FINAL_ROLLING_HISTORY_BARS)
+        output_path = output_dir / f"frame_{idx:04d}.png"
+        fig.savefig(output_path, dpi=180, facecolor="black", bbox_inches="tight")
+        saved_paths.append(output_path)
+        plt.close(fig)
+    return saved_paths
+'@
+
+$cells += New-CodeCell @'
+FINAL_ROLLING_BACKTEST_DATE = select_final_rolling_backtest_date(
+    session_df=session_df,
+    requested=FINAL_ROLLING_BACKTEST_DATE,
+    max_lookback=MAX_ROLLING_LOOKBACK,
+    horizon=HORIZON,
+)
+FINAL_ROLLING_ANCHOR_INDICES = build_final_rolling_anchor_indices(
+    session_df=session_df,
+    backtest_date=FINAL_ROLLING_BACKTEST_DATE,
+    max_lookback=MAX_ROLLING_LOOKBACK,
+    horizon=HORIZON,
+    step=FINAL_ROLLING_STEP,
+)
+
+FINAL_ROLLING_ACTUAL = build_actual_paths_for_anchor_indices(FEATURE_FRAMES["core"], FINAL_ROLLING_ANCHOR_INDICES)
+
+FINAL_ROLLING_EXPERT_OUTPUTS: Dict[str, Dict[str, Any]] = {}
+for expert_name in EXPECTED_EXPERTS:
+    FINAL_ROLLING_EXPERT_OUTPUTS[expert_name] = run_final_rolling_for_bundle(expert_name, FINAL_ROLLING_ANCHOR_INDICES)
+
+FINAL_ROLLING_LOGS = build_final_rolling_logs(
+    anchor_indices=FINAL_ROLLING_ANCHOR_INDICES,
+    actual_payload=FINAL_ROLLING_ACTUAL,
+    expert_outputs=FINAL_ROLLING_EXPERT_OUTPUTS,
+)
+
+FINAL_ROLLING_SUMMARY_DF, FINAL_ROLLING_METRICS_DF, FINAL_ROLLING_NEXT_CLOSE_DF = summarize_final_rolling_logs(FINAL_ROLLING_LOGS)
+
+print(
+    {
+        "rolling_backtest_date": FINAL_ROLLING_BACKTEST_DATE,
+        "rolling_prediction_count": len(FINAL_ROLLING_LOGS),
+        "first_anchor": str(FINAL_ROLLING_LOGS[0].anchor_timestamp),
+        "last_anchor": str(FINAL_ROLLING_LOGS[-1].anchor_timestamp),
+    }
+)
+display(FINAL_ROLLING_METRICS_DF)
+display(FINAL_ROLLING_SUMMARY_DF.head())
+
+plt.figure(figsize=(14, 5))
+plt.plot(FINAL_ROLLING_NEXT_CLOSE_DF["anchor_timestamp"], FINAL_ROLLING_NEXT_CLOSE_DF["actual_next_close"], color="black", linewidth=2.6, label="actual_next_close")
+plt.plot(FINAL_ROLLING_NEXT_CLOSE_DF["anchor_timestamp"], FINAL_ROLLING_NEXT_CLOSE_DF["aggregate_next_close"], color="#1f77b4", linewidth=2.0, label="aggregate_next_close")
+for expert_name in EXPECTED_EXPERTS:
+    plt.plot(
+        FINAL_ROLLING_NEXT_CLOSE_DF["anchor_timestamp"],
+        FINAL_ROLLING_NEXT_CLOSE_DF[f"{expert_name}_next_close"],
+        linewidth=1.0,
+        alpha=0.65,
+        label=expert_name,
+    )
+plt.title(f"{SYMBOL} One-Day Rolling Backtest (t+1 Close)")
+plt.xlabel("Anchor Timestamp")
+plt.ylabel("Close Price")
+plt.grid(alpha=0.2)
+plt.legend(ncol=3)
+plt.tight_layout()
+plt.show()
+
+preview_index = FINAL_ROLLING_DISPLAY_FRAME_INDEX if FINAL_ROLLING_DISPLAY_FRAME_INDEX >= 0 else len(FINAL_ROLLING_LOGS) - 1
+preview_index = max(0, min(preview_index, len(FINAL_ROLLING_LOGS) - 1))
+FINAL_ROLLING_PREVIEW_FIG = render_final_rolling_frame(
+    FINAL_ROLLING_LOGS[preview_index],
+    pricedf=session_df,
+    history_bars=FINAL_ROLLING_HISTORY_BARS,
+)
+plt.show()
+
+FINAL_ROLLING_SAVED_FRAMES: List[Path] = []
+if FINAL_ROLLING_SAVE_FRAMES:
+    FINAL_ROLLING_SAVED_FRAMES = generate_final_rolling_frames(
+        logs=FINAL_ROLLING_LOGS,
+        pricedf=session_df,
+        output_dir=FINAL_ROLLING_FRAME_OUTPUT_DIR,
+    )
+    print(
+        {
+            "rolling_frames_dir": str(FINAL_ROLLING_FRAME_OUTPUT_DIR),
+            "rolling_frames_saved": len(FINAL_ROLLING_SAVED_FRAMES),
+        }
+    )
+'@
+
 $cells += New-CodeCell @'
 if SAVE_RUN_OUTPUTS:
     ensure_dir(FINAL_RUN_DIR)
@@ -1268,6 +1779,10 @@ if SAVE_RUN_OUTPUTS:
     save_dataframe(expert_summary_df, FINAL_RUN_DIR / "expert_prediction_summary.csv")
     save_dataframe(close_path_df, FINAL_RUN_DIR / "close_path_comparison.csv")
     save_dataframe(pd.DataFrame(aggregate_path, columns=["Open", "High", "Low", "Close"]), FINAL_RUN_DIR / "aggregate_forecast.csv")
+    save_dataframe(FINAL_ROLLING_SUMMARY_DF, FINAL_RUN_DIR / "rolling_backtest_summary.csv")
+    save_dataframe(FINAL_ROLLING_METRICS_DF, FINAL_RUN_DIR / "rolling_backtest_metrics.csv")
+    save_dataframe(FINAL_ROLLING_NEXT_CLOSE_DF, FINAL_RUN_DIR / "rolling_backtest_next_close.csv")
+    FINAL_ROLLING_PREVIEW_FIG.savefig(FINAL_RUN_DIR / "rolling_backtest_preview.png", dpi=180, facecolor="black", bbox_inches="tight")
     save_json(
         FINAL_RUN_DIR / "policy_summary.json",
         {
@@ -1277,7 +1792,7 @@ if SAVE_RUN_OUTPUTS:
             "symbol": SYMBOL,
         },
     )
-    np.savez_compressed(
+    save_npz(
         FINAL_RUN_DIR / "forecast_bundle.npz",
         aggregate_path=aggregate_path.astype(np.float32),
         aggregate_path_raw=aggregate_path_raw.astype(np.float32),
@@ -1285,6 +1800,17 @@ if SAVE_RUN_OUTPUTS:
         close_path_steps=close_path_df["step"].to_numpy(dtype=np.int32),
         close_path_values=close_path_df.drop(columns=["step"]).to_numpy(dtype=np.float32),
     )
+    rolling_bundle_arrays = {
+        "anchor_indices": FINAL_ROLLING_ANCHOR_INDICES.astype(np.int32),
+        "anchor_timestamps": np.asarray([ts.isoformat() for ts in FINAL_ROLLING_ACTUAL["anchor_timestamps"]]),
+        "prev_close": FINAL_ROLLING_ACTUAL["prev_close"].astype(np.float32),
+        "actual_paths": FINAL_ROLLING_ACTUAL["actual_paths"].astype(np.float32),
+        "aggregate_paths": np.stack([log.aggregate_path for log in FINAL_ROLLING_LOGS]).astype(np.float32),
+    }
+    for expert_name in EXPECTED_EXPERTS:
+        rolling_bundle_arrays[f"{expert_name}_predicted_paths"] = FINAL_ROLLING_EXPERT_OUTPUTS[expert_name]["predicted_paths"].astype(np.float32)
+        rolling_bundle_arrays[f"{expert_name}_temperatures"] = FINAL_ROLLING_EXPERT_OUTPUTS[expert_name]["temperatures"].astype(np.float32)
+    save_npz(FINAL_RUN_DIR / "rolling_backtest_bundle.npz", **rolling_bundle_arrays)
     save_json(
         FINAL_RUN_DIR / "run_metadata.json",
         {
@@ -1294,6 +1820,9 @@ if SAVE_RUN_OUTPUTS:
             "manifest_path": str(MANIFEST_PATH),
             "weights_path": str(weights_path),
             "policy_path": str(policy_path),
+            "rolling_backtest_date": FINAL_ROLLING_BACKTEST_DATE,
+            "rolling_prediction_count": len(FINAL_ROLLING_LOGS),
+            "rolling_frames_saved": len(FINAL_ROLLING_SAVED_FRAMES),
         },
     )
     print(f"Inference outputs written to: {FINAL_RUN_DIR}")
