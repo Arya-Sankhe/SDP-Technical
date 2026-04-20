@@ -130,6 +130,9 @@ FINAL_ROLLING_BACKTEST_DATE = None
 FINAL_ROLLING_HISTORY_BARS = 220
 FINAL_ROLLING_SAVE_FRAMES = False
 FINAL_ROLLING_DISPLAY_FRAME_INDEX = -1
+FINAL_ROLLING_USE_CPU_ON_LOW_VRAM = LOW_VRAM_GPU
+FINAL_ROLLING_DEVICE = torch.device("cpu") if FINAL_ROLLING_USE_CPU_ON_LOW_VRAM else DEVICE
+FINAL_ROLLING_CLEAR_EVERY = 24
 
 TARGET_COLUMNS = ["rOpen", "rHigh", "rLow", "rClose"]
 CORE_FEATURE_COLUMNS = [
@@ -218,6 +221,7 @@ print(
         "run_label": RUN_LABEL,
         "save_run_outputs": SAVE_RUN_OUTPUTS,
         "final_rolling_save_frames": FINAL_ROLLING_SAVE_FRAMES,
+        "final_rolling_device": str(FINAL_ROLLING_DEVICE),
     }
 )
 '@
@@ -850,7 +854,7 @@ class ActorCritic(nn.Module):
 '@
 
 $cells += New-CodeCell @'
-def build_model_from_checkpoint(checkpoint: Dict[str, Any]) -> nn.Module:
+def build_model_from_checkpoint(checkpoint: Dict[str, Any], device_override: Optional[torch.device] = None) -> nn.Module:
     spec = checkpoint["spec"]
     architecture = spec["architecture"]
     input_dim = int(checkpoint["input_dim"])
@@ -858,6 +862,7 @@ def build_model_from_checkpoint(checkpoint: Dict[str, Any]) -> nn.Module:
     num_layers = checkpoint["training_defaults"]["num_layers"]
     dropout = checkpoint["training_defaults"]["dropout"]
     horizon = HORIZON
+    target_device = device_override if device_override is not None else DEVICE
 
     if architecture in ["gru", "gru_rag"]:
         model = Seq2SeqAttnGRU(input_dim, hidden_size, num_layers, dropout, horizon)
@@ -877,10 +882,10 @@ def build_model_from_checkpoint(checkpoint: Dict[str, Any]) -> nn.Module:
         raise ValueError(f"Unsupported architecture: {architecture}")
 
     model.load_state_dict(checkpoint["state_dict"])
-    return model.to(DEVICE).eval()
+    return model.to(target_device).eval()
 
 
-def load_expert_bundle(expert_name: str) -> LoadedExpertBundle:
+def load_expert_bundle(expert_name: str, device_override: Optional[torch.device] = None) -> LoadedExpertBundle:
     artifact = MODEL_ARTIFACTS[expert_name]
     model_path = Path(artifact["model_path"])
     scaler_path = Path(artifact["scaler_path"])
@@ -890,7 +895,7 @@ def load_expert_bundle(expert_name: str) -> LoadedExpertBundle:
         fail_if_missing(path, f"Missing artifact for {expert_name}")
 
     checkpoint = torch.load(model_path, map_location="cpu")
-    model = build_model_from_checkpoint(checkpoint)
+    model = build_model_from_checkpoint(checkpoint, device_override=device_override)
     scaler_npz = np.load(scaler_path)
     scaler = {"mean": scaler_npz["mean"].astype(np.float32), "std": scaler_npz["std"].astype(np.float32)}
     feature_manifest = load_json(feature_manifest_path)
@@ -974,11 +979,16 @@ def detect_regime_multiplier(history_slice: pd.DataFrame) -> Tuple[str, float, f
     return "NORMAL", 1.0, 0.0
 
 
+def get_model_device(model: nn.Module) -> torch.device:
+    return next(model.parameters()).device
+
+
 def retrieve_future_returns(model: nn.Module, x_scaled_single: np.ndarray, retrieval_artifact: Optional[Dict[str, np.ndarray]], k_retrieve: int) -> Optional[np.ndarray]:
     if retrieval_artifact is None or len(retrieval_artifact["embeddings"]) == 0:
         return None
-    with torch.no_grad():
-        query = torch.from_numpy(x_scaled_single[None, ...]).to(DEVICE)
+    model_device = get_model_device(model)
+    with torch.inference_mode():
+        query = torch.from_numpy(x_scaled_single[None, ...]).to(model_device)
         query_embedding = model.encode_context(query).detach().cpu().numpy()[0].astype(np.float32)
     query_embedding /= np.linalg.norm(query_embedding).clip(min=1e-8)
     similarities = retrieval_artifact["embeddings"] @ query_embedding
@@ -1024,8 +1034,9 @@ def build_latest_input(feature_df: pd.DataFrame, bundle: LoadedExpertBundle) -> 
 
 def generate_ensemble_with_trend_selection(bundle: LoadedExpertBundle, model_input: Dict[str, Any], temperature: float, regime_multiplier: float = 1.0) -> np.ndarray:
     model = bundle.model
-    x_tensor = torch.from_numpy(model_input["scaled_input"][None, ...]).to(DEVICE)
-    with torch.no_grad():
+    model_device = get_model_device(model)
+    x_tensor = torch.from_numpy(model_input["scaled_input"][None, ...]).to(model_device)
+    with torch.inference_mode():
         encoder_memory, decoder_hidden_init = model.encode_sequence(x_tensor)
     decoder_input_init = x_tensor[:, -1, :4]
     candidate_paths = []
@@ -1041,13 +1052,13 @@ def generate_ensemble_with_trend_selection(bundle: LoadedExpertBundle, model_inp
 
     for seed_offset in range(bundle.ensemble_size):
         torch.manual_seed(SEED + seed_offset)
-        if torch.cuda.is_available():
+        if model_device.type == "cuda":
             torch.cuda.manual_seed_all(SEED + seed_offset)
         decoder_hidden = decoder_hidden_init.clone()
         decoder_input = decoder_input_init.clone()
         sampled_steps = []
         for _ in range(HORIZON):
-            with torch.no_grad():
+            with torch.inference_mode():
                 mu, log_sigma, decoder_hidden = model.decode_step(decoder_input, decoder_hidden, encoder_memory)
                 sigma = torch.exp(log_sigma).clamp(min=bundle.inference_config["min_predicted_vol"]) * temperature * regime_multiplier
                 sample = mu + torch.randn_like(mu) * sigma
@@ -1300,6 +1311,8 @@ print(
         "final_rolling_backtest_date": FINAL_ROLLING_BACKTEST_DATE,
         "final_rolling_history_bars": FINAL_ROLLING_HISTORY_BARS,
         "final_rolling_save_frames": FINAL_ROLLING_SAVE_FRAMES,
+        "final_rolling_device": str(FINAL_ROLLING_DEVICE),
+        "final_rolling_clear_every": FINAL_ROLLING_CLEAR_EVERY,
         "max_rolling_lookback": MAX_ROLLING_LOOKBACK,
     }
 )
@@ -1400,13 +1413,13 @@ def build_actual_paths_for_anchor_indices(feature_df: pd.DataFrame, anchor_indic
 
 
 def run_final_rolling_for_bundle(expert_name: str, anchor_indices: np.ndarray) -> Dict[str, Any]:
-    bundle = load_expert_bundle(expert_name)
+    bundle = load_expert_bundle(expert_name, device_override=FINAL_ROLLING_DEVICE)
     feature_df = FEATURE_FRAMES[bundle.feature_mode]
     predicted_paths: List[np.ndarray] = []
     regime_indicators: List[float] = []
     temperatures: List[float] = []
 
-    for anchor_index in tqdm(anchor_indices, desc=f"{bundle.version} final rolling"):
+    for offset, anchor_index in enumerate(tqdm(anchor_indices, desc=f"{bundle.version} final rolling")):
         model_input = build_anchor_input(feature_df, bundle, int(anchor_index))
         regime_name = "NORMAL"
         regime_indicator = 0.0
@@ -1430,6 +1443,9 @@ def run_final_rolling_for_bundle(expert_name: str, anchor_indices: np.ndarray) -
         regime_indicators.append(float(regime_indicator))
         temperatures.append(float(effective_temperature * regime_multiplier))
 
+        if (offset + 1) % FINAL_ROLLING_CLEAR_EVERY == 0:
+            clear_torch_memory()
+
     result = {
         "expert": expert_name,
         "version": bundle.version,
@@ -1441,6 +1457,7 @@ def run_final_rolling_for_bundle(expert_name: str, anchor_indices: np.ndarray) -
         "temperatures": np.asarray(temperatures, dtype=np.float32),
     }
 
+    bundle.model = bundle.model.to("cpu")
     del bundle.model
     clear_torch_memory()
     return result
