@@ -133,6 +133,14 @@ FINAL_ROLLING_DISPLAY_FRAME_INDEX = -1
 FINAL_ROLLING_USE_CPU_ON_LOW_VRAM = LOW_VRAM_GPU
 FINAL_ROLLING_DEVICE = torch.device("cpu") if FINAL_ROLLING_USE_CPU_ON_LOW_VRAM else DEVICE
 FINAL_ROLLING_CLEAR_EVERY = 24
+FINAL_WEIGHT_PRIOR_BLEND = 1.0
+FINAL_AGGREGATION_WEIGHT_PRIOR = {
+    "v8_5": 0.10,
+    "v9_1": 0.10,
+    "v9_2": 0.15,
+    "v9_5": 0.65,
+}
+FINAL_AGGREGATE_SHRINK = 0.85
 
 TARGET_COLUMNS = ["rOpen", "rHigh", "rLow", "rClose"]
 CORE_FEATURE_COLUMNS = [
@@ -222,6 +230,8 @@ print(
         "save_run_outputs": SAVE_RUN_OUTPUTS,
         "final_rolling_save_frames": FINAL_ROLLING_SAVE_FRAMES,
         "final_rolling_device": str(FINAL_ROLLING_DEVICE),
+        "final_weight_prior_blend": FINAL_WEIGHT_PRIOR_BLEND,
+        "final_aggregate_shrink": FINAL_AGGREGATE_SHRINK,
     }
 )
 '@
@@ -312,6 +322,37 @@ def returns_to_prices_seq(anchor_prev_close: float, return_seq: np.ndarray) -> n
         prices[step] = np.exp(return_seq[step]) * prev_close
         prev_close = float(prices[step, 3])
     return enforce_candle_validity(prices)
+
+
+def normalize_weight_map(weight_map: Dict[str, float], experts: Sequence[str]) -> Dict[str, float]:
+    filtered = {expert: max(0.0, float(weight_map.get(expert, 0.0))) for expert in experts}
+    total = sum(filtered.values())
+    if total <= 0.0:
+        uniform = 1.0 / max(len(experts), 1)
+        return {expert: uniform for expert in experts}
+    return {expert: value / total for expert, value in filtered.items()}
+
+
+def build_final_inference_weights(saved_weights: Dict[str, float], experts: Sequence[str]) -> Dict[str, float]:
+    saved_norm = normalize_weight_map(saved_weights, experts)
+    prior_raw = {
+        expert: float(FINAL_AGGREGATION_WEIGHT_PRIOR.get(expert, saved_norm.get(expert, 0.0)))
+        for expert in experts
+    }
+    prior_norm = normalize_weight_map(prior_raw, experts)
+    blended = {
+        expert: (1.0 - FINAL_WEIGHT_PRIOR_BLEND) * saved_norm[expert] + FINAL_WEIGHT_PRIOR_BLEND * prior_norm[expert]
+        for expert in experts
+    }
+    return normalize_weight_map(blended, experts)
+
+
+def shrink_path_to_anchor(path: np.ndarray, anchor_prev_close: float, shrink: float) -> np.ndarray:
+    if not 0.0 < float(shrink) <= 1.0:
+        raise ValueError(f"Shrink factor must be in (0, 1], got {shrink}")
+    anchor = float(anchor_prev_close)
+    shrunk = anchor + float(shrink) * (np.asarray(path, dtype=np.float32) - anchor)
+    return enforce_candle_validity(shrunk.astype(np.float32))
 '@
 
 $cells += New-CodeCell @'
@@ -338,9 +379,10 @@ state_schema_path = Path(manifest["rl"]["state_schema_path"])
 for path in [weights_path, policy_path, env_config_path, state_schema_path]:
     fail_if_missing(path, "Required inference artifact is missing")
 
-ensemble_weights = load_json(weights_path)
-if abs(sum(ensemble_weights.values()) - 1.0) >= 1e-6:
+saved_ensemble_weights = load_json(weights_path)
+if abs(sum(saved_ensemble_weights.values()) - 1.0) >= 1e-6:
     raise ValueError("Saved ensemble weights do not sum to 1.0")
+ensemble_weights = build_final_inference_weights(saved_ensemble_weights, EXPECTED_EXPERTS)
 
 artifact_rows = []
 for expert_name in EXPECTED_EXPERTS:
@@ -352,7 +394,8 @@ for expert_name in EXPECTED_EXPERTS:
             "lookback": artifact["lookback"],
             "feature_mode": artifact["feature_mode"],
             "architecture": artifact["architecture"],
-            "weight": ensemble_weights[expert_name],
+            "saved_weight": saved_ensemble_weights[expert_name],
+            "final_weight": ensemble_weights[expert_name],
         }
     )
 artifact_summary_df = pd.DataFrame(artifact_rows)
@@ -1174,12 +1217,13 @@ display(expert_summary_df)
 $cells += New-CodeCell @'
 aggregate_path_raw = np.zeros((HORIZON, 4), dtype=np.float32)
 aggregate_regime_indicator = 0.0
+aggregate_anchor_prev_close = float(list(EXPERT_PREDICTIONS.values())[0]["anchor_prev_close"])
 for expert_name in EXPECTED_EXPERTS:
     weight = float(ensemble_weights[expert_name])
     aggregate_path_raw += weight * EXPERT_PREDICTIONS[expert_name]["path"]
     aggregate_regime_indicator += weight * EXPERT_PREDICTIONS[expert_name]["regime_indicator"]
 
-aggregate_path = enforce_candle_validity(aggregate_path_raw)
+aggregate_path = shrink_path_to_anchor(aggregate_path_raw, aggregate_anchor_prev_close, FINAL_AGGREGATE_SHRINK)
 aggregate_regime_name = regime_name_from_indicator(aggregate_regime_indicator)
 
 close_path_df = pd.DataFrame({"step": np.arange(1, HORIZON + 1)})
@@ -1191,13 +1235,14 @@ aggregate_summary_df = pd.DataFrame(
     [
         {
             "anchor_timestamp": list(EXPERT_PREDICTIONS.values())[0]["anchor_timestamp"],
-            "prev_close": list(EXPERT_PREDICTIONS.values())[0]["anchor_prev_close"],
+            "prev_close": aggregate_anchor_prev_close,
             "aggregate_next_close": float(aggregate_path[0, 3]),
             "aggregate_horizon_close": float(aggregate_path[-1, 3]),
-            "aggregate_next_return_pct": float((aggregate_path[0, 3] / list(EXPERT_PREDICTIONS.values())[0]["anchor_prev_close"] - 1.0) * 100.0),
-            "aggregate_horizon_return_pct": float((aggregate_path[-1, 3] / list(EXPERT_PREDICTIONS.values())[0]["anchor_prev_close"] - 1.0) * 100.0),
+            "aggregate_next_return_pct": float((aggregate_path[0, 3] / aggregate_anchor_prev_close - 1.0) * 100.0),
+            "aggregate_horizon_return_pct": float((aggregate_path[-1, 3] / aggregate_anchor_prev_close - 1.0) * 100.0),
             "aggregate_regime_name": aggregate_regime_name,
             "aggregate_regime_indicator": float(aggregate_regime_indicator),
+            "aggregate_shrink": float(FINAL_AGGREGATE_SHRINK),
         }
     ]
 )
@@ -1480,6 +1525,11 @@ def build_final_rolling_logs(
             temperatures[expert_name] = float(expert_outputs[expert_name]["temperatures"][offset])
             aggregate_raw += float(ensemble_weights[expert_name]) * expert_path
             aggregate_regime_indicator += float(ensemble_weights[expert_name]) * float(expert_outputs[expert_name]["regime_indicators"][offset])
+        aggregate_path = shrink_path_to_anchor(
+            aggregate_raw,
+            float(actual_payload["prev_close"][offset]),
+            FINAL_AGGREGATE_SHRINK,
+        )
 
         logs.append(
             FinalRollingLog(
@@ -1488,7 +1538,7 @@ def build_final_rolling_logs(
                 future_timestamps=actual_payload["future_timestamps"][offset],
                 anchor_prev_close=float(actual_payload["prev_close"][offset]),
                 actual_path=actual_payload["actual_paths"][offset],
-                aggregate_path=enforce_candle_validity(aggregate_raw),
+                aggregate_path=aggregate_path,
                 expert_paths=expert_paths,
                 aggregate_regime_indicator=float(aggregate_regime_indicator),
                 temperatures=temperatures,
@@ -1807,6 +1857,9 @@ if SAVE_RUN_OUTPUTS:
             "portfolio_state": PORTFOLIO_STATE,
             "run_label": RUN_LABEL,
             "symbol": SYMBOL,
+            "saved_weights": saved_ensemble_weights,
+            "final_weights": ensemble_weights,
+            "aggregate_shrink": FINAL_AGGREGATE_SHRINK,
         },
     )
     save_npz(
@@ -1837,6 +1890,9 @@ if SAVE_RUN_OUTPUTS:
             "manifest_path": str(MANIFEST_PATH),
             "weights_path": str(weights_path),
             "policy_path": str(policy_path),
+            "saved_weights": saved_ensemble_weights,
+            "final_weights": ensemble_weights,
+            "aggregate_shrink": FINAL_AGGREGATE_SHRINK,
             "rolling_backtest_date": FINAL_ROLLING_BACKTEST_DATE,
             "rolling_prediction_count": len(FINAL_ROLLING_LOGS),
             "rolling_frames_saved": len(FINAL_ROLLING_SAVED_FRAMES),
