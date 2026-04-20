@@ -1,0 +1,76 @@
+{
+  "runtime": {
+    "created_at_utc": "2026-04-20T11:44:56Z",
+    "symbol": "MSFT",
+    "device": "cuda",
+    "gpu_mem_gb": 8.0,
+    "lookback_days": 120,
+    "horizon": 50
+  },
+  "shared": {
+    "raw_snapshot": "output\\final_artifacts\\shared\\raw_snapshot.parquet",
+    "sessionized_snapshot": "output\\final_artifacts\\shared\\sessionized_snapshot.parquet",
+    "split_spec": "output\\final_artifacts\\shared\\split_spec.json",
+    "calendar_meta": "output\\final_artifacts\\shared\\calendar_meta.json"
+  },
+  "forecast_models": {
+    "v8_5": {
+      "version": "v8.5",
+      "dir": "output\\final_artifacts\\models\\v8_5",
+      "lookback": 64,
+      "feature_mode": "core",
+      "architecture": "gru",
+      "model_path": "output\\final_artifacts\\models\\v8_5\\model.pt",
+      "scaler_path": "output\\final_artifacts\\models\\v8_5\\scaler.npz",
+      "feature_manifest_path": "output\\final_artifacts\\models\\v8_5\\feature_manifest.json",
+      "train_config_path": "output\\final_artifacts\\models\\v8_5\\train_config.json",
+      "inference_config_path": "output\\final_artifacts\\models\\v8_5\\inference_config.json",
+      "metrics_path": "output\\final_artifacts\\models\\v8_5\\metrics.json",
+      "history_path": "output\\final_artifacts\\models\\v8_5\\history.csv",
+      "rolling_predictions_path": "output\\final_artifacts\\models\\v8_5\\rolling_predictions.npz"
+    },
+    "v9_1": {
+      "version": "v9.1",
+      "dir": "output\\final_artifacts\\models\\v9_1",
+      "lookback": 160,
+      "feature_mode": "technical",
+      "architecture": "gru",
+      "model_path": "output\\final_artifacts\\models\\v9_1\\model.pt",
+      "scaler_path": "output\\final_artifacts\\models\\v9_1\\scaler.npz",
+      "feature_manifest_path": "output\\final_artifacts\\models\\v9_1\\feature_manifest.json",
+      "train_config_path": "output\\final_artifacts\\models\\v9_1\\train_config.json",
+      "inference_config_path": "output\\final_artifacts\\models\\v9_1\\inference_config.json",
+      "metrics_path": "output\\final_artifacts\\models\\v9_1\\metrics.json",
+      "history_path": "output\\final_artifacts\\models\\v9_1\\history.csv",
+      "rolling_predictions_path": "output\\final_artifacts\\models\\v9_1\\rolling_predictions.npz"
+    },
+    "v9_2": {
+      "version": "v9.2",
+      "dir": "output\\final_artifacts\\models\\v9_2",
+      "lookback": 256,
+      "feature_mode": "regime",
+      "architecture": "gru",
+      "model_path": "output\\final_artifacts\\models\\v9_2\\model.pt",
+      "scaler_path": "output\\final_artifacts\\models\\v9_2\\scaler.npz",
+      "feature_manifest_path": "output\\final_artifacts\\models\\v9_2\\feature_manifest.json",
+      "train_config_path": "output\\final_artifacts\\models\\v9_2\\train_config.json",
+      "inference_config_path": "output\\final_artifacts\\models\\v9_2\\inference_config.json",
+      "metrics_path": "output\\final_artifacts\\models\\v9_2\\metrics.json",
+      "history_path": "output\\final_artifacts\\models\\v9_2\\history.csv",
+      "rolling_predictions_path": "output\\final_artifacts\\models\\v9_2\\rolling_predictions.npz"
+    }
+  },
+  "ensemble": {
+    "weights_json": "output\\final_artifacts\\ensemble\\weights.json",
+    "weights_csv": "output\\final_artifacts\\ensemble\\weights.csv",
+    "validation_summary": "output\\final_artifacts\\ensemble\\validation_summary.csv",
+    "rolling_summary": "output\\final_artifacts\\ensemble\\rolling_summary.csv"
+  },
+  "rl": {
+    "policy_path": "output\\final_artifacts\\rl\\policy.pt",
+    "env_config_path": "output\\final_artifacts\\rl\\env_config.json",
+    "state_schema_path": "output\\final_artifacts\\rl\\state_schema.json",
+    "training_metrics_path": "output\\final_artifacts\\rl\\training_metrics.json",
+    "aggregate_predictions_path": "output\\final_artifacts\\rl\\aggregate_predictions.npz"
+  }
+}

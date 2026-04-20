@@ -1,0 +1,25 @@
+{
+  "forecast_path_features": 200,
+  "market_features": [
+    "rsi_14",
+    "macd_histogram",
+    "bb_position",
+    "atr_14_pct",
+    "price_momentum_5",
+    "price_momentum_20",
+    "vwap_20_dev",
+    "obv_slope",
+    "direction",
+    "relative_volume"
+  ],
+  "portfolio_features": [
+    "cash_norm",
+    "shares_norm",
+    "portfolio_value_norm",
+    "position_pct"
+  ],
+  "regime_feature": [
+    "regime_indicator"
+  ],
+  "state_dim": 215
+}

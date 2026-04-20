@@ -1,0 +1,54 @@
+{
+  "stats": [
+    {
+      "step": 512,
+      "rollout_reward_mean": -0.042366150727044916,
+      "portfolio_value": 88688.42939316279
+    },
+    {
+      "step": 1024,
+      "rollout_reward_mean": -0.022699866601580306,
+      "portfolio_value": 98743.34382088222
+    },
+    {
+      "step": 1536,
+      "rollout_reward_mean": -0.017919391071172,
+      "portfolio_value": 87852.95151795166
+    },
+    {
+      "step": 2048,
+      "rollout_reward_mean": -0.03015089822088217,
+      "portfolio_value": 98183.32222658001
+    },
+    {
+      "step": 2560,
+      "rollout_reward_mean": -0.017372864342860693,
+      "portfolio_value": 88375.89476283714
+    },
+    {
+      "step": 3072,
+      "rollout_reward_mean": -0.026176090110585595,
+      "portfolio_value": 95051.31856693284
+    },
+    {
+      "step": 3584,
+      "rollout_reward_mean": -0.02193947244837897,
+      "portfolio_value": 87559.29781910889
+    },
+    {
+      "step": 4096,
+      "rollout_reward_mean": -0.011431026854403125,
+      "portfolio_value": 94730.5131776127
+    },
+    {
+      "step": 4608,
+      "rollout_reward_mean": -0.02646000070179602,
+      "portfolio_value": 85167.88971100145
+    },
+    {
+      "step": 5000,
+      "rollout_reward_mean": -0.03333664267134014,
+      "portfolio_value": 99639.14314800216
+    }
+  ]
+}

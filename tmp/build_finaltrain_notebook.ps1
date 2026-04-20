@@ -114,7 +114,8 @@ if torch.cuda.is_available():
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 LOW_VRAM_GPU = DEVICE.type == "cuda" and (torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)) <= 8.5
 SKIP_HEAVY_EXPERTS_ON_WINDOWS_8GB = os.name == "nt" and LOW_VRAM_GPU
-SKIPPED_EXPERT_NAMES = {"v9_3", "v9_5"} if SKIP_HEAVY_EXPERTS_ON_WINDOWS_8GB else set()
+LIGHTWEIGHT_V95_ON_LOW_VRAM = os.name == "nt" and LOW_VRAM_GPU
+SKIPPED_EXPERT_NAMES = {"v9_3"} if SKIP_HEAVY_EXPERTS_ON_WINDOWS_8GB else set()
 
 SYMBOL = "MSFT"
 LOOKBACK_DAYS = 120
@@ -279,6 +280,8 @@ class ExpertSpec:
     d_model: int = 128
     n_heads: int = 4
     n_layers: int = 2
+    max_val_windows: int = MAX_VAL_WINDOWS_PER_SLICE
+    retrieval_max_patterns: Optional[int] = None
 
 
 FORECAST_SPECS = [
@@ -300,7 +303,20 @@ FORECAST_SPECS = [
         n_heads=8,
         n_layers=2,
     ),
-    ExpertSpec("v9_5", "v9.5", 256, "core", "gru_rag", ensemble_size=20, batch_size=256, eval_batch_size=256, use_retrieval=True),
+    ExpertSpec(
+        "v9_5",
+        "v9.5",
+        256,
+        "core",
+        "gru_rag",
+        ensemble_size=8 if LIGHTWEIGHT_V95_ON_LOW_VRAM else 20,
+        batch_size=128 if LIGHTWEIGHT_V95_ON_LOW_VRAM else 256,
+        eval_batch_size=64 if LIGHTWEIGHT_V95_ON_LOW_VRAM else 256,
+        low_vram=LIGHTWEIGHT_V95_ON_LOW_VRAM,
+        use_retrieval=True,
+        max_val_windows=96 if LIGHTWEIGHT_V95_ON_LOW_VRAM else MAX_VAL_WINDOWS_PER_SLICE,
+        retrieval_max_patterns=1024 if LIGHTWEIGHT_V95_ON_LOW_VRAM else None,
+    ),
 ]
 
 ACTIVE_FORECAST_SPECS = [spec for spec in FORECAST_SPECS if spec.name not in SKIPPED_EXPERT_NAMES]
@@ -310,6 +326,7 @@ print({
     "device": str(DEVICE),
     "low_vram_gpu": LOW_VRAM_GPU,
     "skip_heavy_experts_on_windows_8gb": SKIP_HEAVY_EXPERTS_ON_WINDOWS_8GB,
+    "lightweight_v95_on_low_vram": LIGHTWEIGHT_V95_ON_LOW_VRAM,
     "skipped_experts": sorted(SKIPPED_EXPERT_NAMES),
     "artifact_root": str(ARTIFACT_ROOT),
     "forecast_experts": [spec.version for spec in ACTIVE_FORECAST_SPECS],
@@ -1120,6 +1137,13 @@ def build_model_for_spec(spec: ExpertSpec, input_dim: int) -> nn.Module:
     raise ValueError(f"Unsupported architecture: {spec.architecture}")
 
 
+def rag_config_for_spec(spec: ExpertSpec) -> Dict[str, Any]:
+    config = dict(RAG_CONFIG)
+    if spec.retrieval_max_patterns is not None:
+        config["max_patterns"] = int(spec.retrieval_max_patterns)
+    return config
+
+
 def build_retrieval_artifact(
     model: nn.Module,
     x_scaled: np.ndarray,
@@ -1147,16 +1171,14 @@ def build_retrieval_artifact(
     }
 
 
-def apply_retrieval_blend(
+def retrieve_future_returns(
     model: nn.Module,
     x_scaled_single: np.ndarray,
-    generated_returns: np.ndarray,
     retrieval_artifact: Optional[Dict[str, np.ndarray]],
     k_retrieve: int,
-    blend_weight: float,
-) -> np.ndarray:
+    ) -> Optional[np.ndarray]:
     if retrieval_artifact is None or len(retrieval_artifact["embeddings"]) == 0:
-        return generated_returns
+        return None
 
     with torch.no_grad():
         query = torch.from_numpy(x_scaled_single[None, ...]).to(DEVICE)
@@ -1167,7 +1189,12 @@ def apply_retrieval_blend(
     top_scores = similarities[top_idx]
     top_weights = np.exp(top_scores - top_scores.max())
     top_weights /= top_weights.sum().clip(min=1e-8)
-    retrieved_future = np.tensordot(top_weights, retrieval_artifact["future_returns"][top_idx], axes=(0, 0))
+    return np.tensordot(top_weights, retrieval_artifact["future_returns"][top_idx], axes=(0, 0)).astype(np.float32)
+
+
+def blend_retrieved_future(generated_returns: np.ndarray, retrieved_future: Optional[np.ndarray], blend_weight: float) -> np.ndarray:
+    if retrieved_future is None:
+        return generated_returns.astype(np.float32)
     return ((1.0 - blend_weight) * generated_returns + blend_weight * retrieved_future).astype(np.float32)
 '@
 
@@ -1387,6 +1414,15 @@ def generate_ensemble_with_trend_selection(
         encoder_memory, decoder_hidden_init = model.encode_sequence(x_tensor)
     decoder_input_init = x_tensor[:, -1, :4]
     candidate_paths: List[np.ndarray] = []
+    retrieved_future = None
+
+    if retrieval_artifact is not None:
+        retrieved_future = retrieve_future_returns(
+            model=model,
+            x_scaled_single=x_scaled_single,
+            retrieval_artifact=retrieval_artifact,
+            k_retrieve=RAG_CONFIG["k_retrieve"],
+        )
 
     for seed_offset in range(spec.ensemble_size):
         torch.manual_seed(SEED + seed_offset)
@@ -1403,15 +1439,11 @@ def generate_ensemble_with_trend_selection(
                 sampled_steps.append(sample.squeeze(0).cpu().numpy().astype(np.float32))
                 decoder_input = sample
         sampled_returns = np.stack(sampled_steps).astype(np.float32)
-        if retrieval_artifact is not None:
-            sampled_returns = apply_retrieval_blend(
-                model=model,
-                x_scaled_single=x_scaled_single,
-                generated_returns=sampled_returns,
-                retrieval_artifact=retrieval_artifact,
-                k_retrieve=RAG_CONFIG["k_retrieve"],
-                blend_weight=RAG_CONFIG["blend_weight"],
-            )
+        sampled_returns = blend_retrieved_future(
+            generated_returns=sampled_returns,
+            retrieved_future=retrieved_future,
+            blend_weight=RAG_CONFIG["blend_weight"],
+        )
         candidate_paths.append(returns_to_prices_seq(anchor_prev_close, sampled_returns))
 
     candidate_paths_array = np.stack(candidate_paths).astype(np.float32)
@@ -1466,7 +1498,7 @@ def run_walkforward_for_spec(feature_df: pd.DataFrame, spec: ExpertSpec) -> Dict
             fold["val"]["y"],
         )
 
-        limit = min(MAX_VAL_WINDOWS_PER_SLICE, len(fold["val"]["x_scaled"]))
+        limit = min(spec.max_val_windows, len(fold["val"]["x_scaled"]))
         pred_paths: List[np.ndarray] = []
         actual_paths: List[np.ndarray] = []
         anchor_prev_close = fold["val"]["prev_close"][:limit]
@@ -1543,13 +1575,14 @@ def train_production_model_for_spec(feature_df: pd.DataFrame, spec: ExpertSpec, 
     )
     retrieval_artifact = None
     if spec.use_retrieval:
+        rag_config = rag_config_for_spec(spec)
         combined_x = np.concatenate([prod_split["train"]["x_scaled"], prod_split["val"]["x_scaled"]], axis=0)
         combined_y = np.concatenate([prod_split["train"]["y"], prod_split["val"]["y"]], axis=0)
         retrieval_artifact = build_retrieval_artifact(
             model=model,
             x_scaled=combined_x,
             y_returns=combined_y,
-            max_patterns=RAG_CONFIG["max_patterns"],
+            max_patterns=rag_config["max_patterns"],
             batch_size=spec.eval_batch_size,
         )
     return {
@@ -1753,7 +1786,7 @@ def save_expert_artifacts(
 
     if spec.use_retrieval and production_bundle["retrieval_artifact"] is not None:
         save_npz(expert_dir / "rag_database.npz", **production_bundle["retrieval_artifact"])
-        save_json(expert_dir / "rag_config.json", RAG_CONFIG)
+        save_json(expert_dir / "rag_config.json", rag_config_for_spec(spec))
 
     return {
         "expert": spec.name,

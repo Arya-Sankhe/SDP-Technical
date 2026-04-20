@@ -1,0 +1,4 @@
+expert,version,lookback,feature_mode,architecture,weight
+v8_5,v8.5,64,core,gru,0.315315705724444
+v9_1,v9.1,160,technical,gru,0.3926119141740527
+v9_2,v9.2,256,regime,gru,0.2920723801015033

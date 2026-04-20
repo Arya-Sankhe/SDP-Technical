@@ -1,0 +1,14 @@
+{
+  "experts": [
+    "v8_5",
+    "v9_1",
+    "v9_2"
+  ],
+  "weights": {
+    "v9_1": 0.3926119141740527,
+    "v8_5": 0.315315705724444,
+    "v9_2": 0.2920723801015033
+  },
+  "backtest_date": "2026-04-17",
+  "aggregation_rule": "reliability_weighted_average"
+}

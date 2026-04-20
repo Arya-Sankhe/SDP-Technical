@@ -666,6 +666,7 @@ class LoadedExpertBundle:
     feature_columns: List[str]
     inference_config: Dict[str, Any]
     retrieval_artifact: Optional[Dict[str, np.ndarray]]
+    rag_config: Dict[str, Any]
     spec: Dict[str, Any]
 
 
@@ -883,7 +884,9 @@ def load_expert_bundle(expert_name: str) -> LoadedExpertBundle:
     inference_config = load_json(inference_config_path)
 
     retrieval_artifact = None
+    rag_config = {"k_retrieve": 5, "blend_weight": 0.25}
     rag_path = Path(artifact["dir"]) / "rag_database.npz"
+    rag_config_path = Path(artifact["dir"]) / "rag_config.json"
     if rag_path.exists():
         rag_npz = np.load(rag_path)
         retrieval_artifact = {
@@ -891,6 +894,8 @@ def load_expert_bundle(expert_name: str) -> LoadedExpertBundle:
             "future_returns": rag_npz["future_returns"].astype(np.float32),
             "indices": rag_npz["indices"].astype(np.int32),
         }
+    if rag_config_path.exists():
+        rag_config = load_json(rag_config_path)
 
     return LoadedExpertBundle(
         expert_name=expert_name,
@@ -905,6 +910,7 @@ def load_expert_bundle(expert_name: str) -> LoadedExpertBundle:
         feature_columns=list(feature_manifest["feature_columns"]),
         inference_config=inference_config,
         retrieval_artifact=retrieval_artifact,
+        rag_config=rag_config,
         spec=checkpoint["spec"],
     )
 
@@ -955,9 +961,9 @@ def detect_regime_multiplier(history_slice: pd.DataFrame) -> Tuple[str, float, f
     return "NORMAL", 1.0, 0.0
 
 
-def apply_retrieval_blend(model: nn.Module, x_scaled_single: np.ndarray, generated_returns: np.ndarray, retrieval_artifact: Optional[Dict[str, np.ndarray]], k_retrieve: int, blend_weight: float) -> np.ndarray:
+def retrieve_future_returns(model: nn.Module, x_scaled_single: np.ndarray, retrieval_artifact: Optional[Dict[str, np.ndarray]], k_retrieve: int) -> Optional[np.ndarray]:
     if retrieval_artifact is None or len(retrieval_artifact["embeddings"]) == 0:
-        return generated_returns
+        return None
     with torch.no_grad():
         query = torch.from_numpy(x_scaled_single[None, ...]).to(DEVICE)
         query_embedding = model.encode_context(query).detach().cpu().numpy()[0].astype(np.float32)
@@ -967,7 +973,12 @@ def apply_retrieval_blend(model: nn.Module, x_scaled_single: np.ndarray, generat
     top_scores = similarities[top_idx]
     top_weights = np.exp(top_scores - top_scores.max())
     top_weights /= top_weights.sum().clip(min=1e-8)
-    retrieved_future = np.tensordot(top_weights, retrieval_artifact["future_returns"][top_idx], axes=(0, 0))
+    return np.tensordot(top_weights, retrieval_artifact["future_returns"][top_idx], axes=(0, 0)).astype(np.float32)
+
+
+def blend_retrieved_future(generated_returns: np.ndarray, retrieved_future: Optional[np.ndarray], blend_weight: float) -> np.ndarray:
+    if retrieved_future is None:
+        return generated_returns.astype(np.float32)
     return ((1.0 - blend_weight) * generated_returns + blend_weight * retrieved_future).astype(np.float32)
 
 
@@ -997,6 +1008,15 @@ def generate_ensemble_with_trend_selection(bundle: LoadedExpertBundle, model_inp
         encoder_memory, decoder_hidden_init = model.encode_sequence(x_tensor)
     decoder_input_init = x_tensor[:, -1, :4]
     candidate_paths = []
+    retrieved_future = None
+
+    if bundle.retrieval_artifact is not None:
+        retrieved_future = retrieve_future_returns(
+            model=model,
+            x_scaled_single=model_input["scaled_input"],
+            retrieval_artifact=bundle.retrieval_artifact,
+            k_retrieve=int(bundle.rag_config.get("k_retrieve", 5)),
+        )
 
     for seed_offset in range(bundle.ensemble_size):
         torch.manual_seed(SEED + seed_offset)
@@ -1013,15 +1033,11 @@ def generate_ensemble_with_trend_selection(bundle: LoadedExpertBundle, model_inp
             sampled_steps.append(sample.squeeze(0).detach().cpu().numpy().astype(np.float32))
             decoder_input = sample
         sampled_returns = np.stack(sampled_steps).astype(np.float32)
-        if bundle.retrieval_artifact is not None:
-            sampled_returns = apply_retrieval_blend(
-                model=model,
-                x_scaled_single=model_input["scaled_input"],
-                generated_returns=sampled_returns,
-                retrieval_artifact=bundle.retrieval_artifact,
-                k_retrieve=5,
-                blend_weight=0.25,
-            )
+        sampled_returns = blend_retrieved_future(
+            generated_returns=sampled_returns,
+            retrieved_future=retrieved_future,
+            blend_weight=float(bundle.rag_config.get("blend_weight", 0.25)),
+        )
         candidate_paths.append(returns_to_prices_seq(model_input["anchor_prev_close"], sampled_returns))
 
     candidate_paths = np.stack(candidate_paths).astype(np.float32)
