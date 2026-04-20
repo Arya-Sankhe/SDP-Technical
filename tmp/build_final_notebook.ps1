@@ -134,11 +134,11 @@ FINAL_ROLLING_USE_CPU_ON_LOW_VRAM = LOW_VRAM_GPU
 FINAL_ROLLING_DEVICE = torch.device("cpu") if FINAL_ROLLING_USE_CPU_ON_LOW_VRAM else DEVICE
 FINAL_ROLLING_CLEAR_EVERY = 24
 FINAL_WEIGHT_PRIOR_BLEND = 1.0
+FINAL_EXCLUDED_EXPERTS = {"v9_2"}
 FINAL_AGGREGATION_WEIGHT_PRIOR = {
     "v8_5": 0.10,
     "v9_1": 0.10,
-    "v9_2": 0.15,
-    "v9_5": 0.65,
+    "v9_5": 0.80,
 }
 FINAL_AGGREGATE_SHRINK = 0.85
 
@@ -231,6 +231,7 @@ print(
         "final_rolling_save_frames": FINAL_ROLLING_SAVE_FRAMES,
         "final_rolling_device": str(FINAL_ROLLING_DEVICE),
         "final_weight_prior_blend": FINAL_WEIGHT_PRIOR_BLEND,
+        "final_excluded_experts": sorted(FINAL_EXCLUDED_EXPERTS),
         "final_aggregate_shrink": FINAL_AGGREGATE_SHRINK,
     }
 )
@@ -366,10 +367,14 @@ for key in ["shared", "forecast_models", "ensemble", "rl"]:
 SYMBOL = manifest["runtime"].get("symbol", SYMBOL)
 HORIZON = int(manifest["runtime"].get("horizon", HORIZON))
 
-MODEL_ARTIFACTS = manifest["forecast_models"]
+MODEL_ARTIFACTS = {
+    expert_name: artifact
+    for expert_name, artifact in manifest["forecast_models"].items()
+    if expert_name not in FINAL_EXCLUDED_EXPERTS
+}
 EXPECTED_EXPERTS = list(MODEL_ARTIFACTS.keys())
-if len(EXPECTED_EXPERTS) < 3:
-    raise ValueError(f"Need at least 3 trained forecast experts, found {EXPECTED_EXPERTS}")
+if len(EXPECTED_EXPERTS) < 2:
+    raise ValueError(f"Need at least 2 active forecast experts after exclusions, found {EXPECTED_EXPERTS}")
 
 weights_path = Path(manifest["ensemble"]["weights_json"])
 policy_path = Path(manifest["rl"]["policy_path"])
@@ -394,7 +399,7 @@ for expert_name in EXPECTED_EXPERTS:
             "lookback": artifact["lookback"],
             "feature_mode": artifact["feature_mode"],
             "architecture": artifact["architecture"],
-            "saved_weight": saved_ensemble_weights[expert_name],
+            "saved_weight": saved_ensemble_weights.get(expert_name, 0.0),
             "final_weight": ensemble_weights[expert_name],
         }
     )
@@ -1857,6 +1862,7 @@ if SAVE_RUN_OUTPUTS:
             "portfolio_state": PORTFOLIO_STATE,
             "run_label": RUN_LABEL,
             "symbol": SYMBOL,
+            "excluded_experts": sorted(FINAL_EXCLUDED_EXPERTS),
             "saved_weights": saved_ensemble_weights,
             "final_weights": ensemble_weights,
             "aggregate_shrink": FINAL_AGGREGATE_SHRINK,
@@ -1890,6 +1896,7 @@ if SAVE_RUN_OUTPUTS:
             "manifest_path": str(MANIFEST_PATH),
             "weights_path": str(weights_path),
             "policy_path": str(policy_path),
+            "excluded_experts": sorted(FINAL_EXCLUDED_EXPERTS),
             "saved_weights": saved_ensemble_weights,
             "final_weights": ensemble_weights,
             "aggregate_shrink": FINAL_AGGREGATE_SHRINK,
