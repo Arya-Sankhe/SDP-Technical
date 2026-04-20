@@ -89,7 +89,6 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 import pandas_market_calendars as mcal
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -114,6 +113,7 @@ if torch.cuda.is_available():
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 LOW_VRAM_GPU = DEVICE.type == "cuda" and (torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)) <= 8.5
+SKIP_V9_3_ON_WINDOWS_8GB = os.name == "nt" and LOW_VRAM_GPU
 
 SYMBOL = "MSFT"
 LOOKBACK_DAYS = 120
@@ -302,12 +302,15 @@ FORECAST_SPECS = [
     ExpertSpec("v9_5", "v9.5", 256, "core", "gru_rag", ensemble_size=20, batch_size=256, eval_batch_size=256, use_retrieval=True),
 ]
 
+ACTIVE_FORECAST_SPECS = [spec for spec in FORECAST_SPECS if not (spec.name == "v9_3" and SKIP_V9_3_ON_WINDOWS_8GB)]
+
 print({
     "symbol": SYMBOL,
     "device": str(DEVICE),
     "low_vram_gpu": LOW_VRAM_GPU,
+    "skip_v9_3_on_windows_8gb": SKIP_V9_3_ON_WINDOWS_8GB,
     "artifact_root": str(ARTIFACT_ROOT),
-    "forecast_experts": [spec.version for spec in FORECAST_SPECS],
+    "forecast_experts": [spec.version for spec in ACTIVE_FORECAST_SPECS],
     "decision_layer": "v9.6 PPO",
 })
 '@
@@ -785,7 +788,7 @@ FEATURE_FRAMES = {
 }
 
 for mode, frame in FEATURE_FRAMES.items():
-    print(mode, frame.shape, frame[feature_columns_for_spec(FORECAST_SPECS[0])[:4]].head(2).to_dict("records"))
+    print(mode, frame.shape, frame[feature_columns_for_spec(ACTIVE_FORECAST_SPECS[0])[:4]].head(2).to_dict("records"))
 '@
 
 $cells += New-CodeCell @'
@@ -1764,7 +1767,7 @@ def load_saved_rolling_arrays(rolling_predictions_path: Path) -> Dict[str, np.nd
 '@
 
 $cells += New-CodeCell @'
-MAX_LOOKBACK = max(spec.lookback for spec in FORECAST_SPECS)
+MAX_LOOKBACK = max(spec.lookback for spec in ACTIVE_FORECAST_SPECS)
 BACKTEST_DATE = select_backtest_date(session_df, max_lookback=MAX_LOOKBACK, horizon=HORIZON)
 BACKTEST_CUTOFF_INDEX = int(np.flatnonzero(session_df["session_date"].to_numpy() == BACKTEST_DATE)[0])
 
@@ -1783,7 +1786,7 @@ EXPERT_ARTIFACTS: Dict[str, Dict[str, Any]] = {}
 validation_rows: List[Dict[str, Any]] = []
 rolling_rows: List[Dict[str, Any]] = []
 
-for spec in FORECAST_SPECS:
+for spec in ACTIVE_FORECAST_SPECS:
     if RESUME_COMPLETED_EXPERTS and expert_artifacts_complete(spec):
         expert_dir = model_dir_for_spec(spec)
         saved_metrics = load_json(expert_dir / "metrics.json")
@@ -1839,7 +1842,7 @@ save_json(
 save_json(
     ENSEMBLE_DIR / "aggregate_config.json",
     {
-        "experts": [spec.name for spec in FORECAST_SPECS],
+        "experts": [spec.name for spec in ACTIVE_FORECAST_SPECS],
         "weights": {row["expert"]: float(row["weight"]) for _, row in ensemble_weights_df.iterrows()},
         "backtest_date": BACKTEST_DATE,
         "aggregation_rule": "reliability_weighted_average",
@@ -2169,7 +2172,7 @@ manifest = {
             "history_path": str(model_dir_for_spec(spec) / "history.csv"),
             "rolling_predictions_path": str(model_dir_for_spec(spec) / "rolling_predictions.npz"),
         }
-        for spec in FORECAST_SPECS
+        for spec in ACTIVE_FORECAST_SPECS
     },
     "ensemble": {
         "weights_json": str(ENSEMBLE_DIR / "weights.json"),
@@ -2188,7 +2191,7 @@ manifest = {
 
 save_json(ARTIFACT_ROOT / "manifest.json", manifest)
 
-for spec in FORECAST_SPECS:
+for spec in ACTIVE_FORECAST_SPECS:
     expert_dir = model_dir_for_spec(spec)
     assert (expert_dir / "model.pt").exists(), f"Missing model for {spec.name}"
     assert (expert_dir / "scaler.npz").exists(), f"Missing scaler for {spec.name}"

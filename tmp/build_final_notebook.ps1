@@ -189,7 +189,7 @@ MARKET_STATE_COLUMNS = [
     "direction",
     "relative_volume",
 ]
-EXPECTED_EXPERTS = ["v8_5", "v9_1", "v9_2", "v9_3", "v9_5"]
+EXPECTED_EXPERTS: List[str] = []
 
 ARTIFACT_ROOT = Path("output/final_artifacts")
 MANIFEST_PATH = ARTIFACT_ROOT / "manifest.json"
@@ -309,9 +309,9 @@ SYMBOL = manifest["runtime"].get("symbol", SYMBOL)
 HORIZON = int(manifest["runtime"].get("horizon", HORIZON))
 
 MODEL_ARTIFACTS = manifest["forecast_models"]
-for expert_name in EXPECTED_EXPERTS:
-    if expert_name not in MODEL_ARTIFACTS:
-        raise KeyError(f"Manifest missing expert artifact for {expert_name}")
+EXPECTED_EXPERTS = list(MODEL_ARTIFACTS.keys())
+if len(EXPECTED_EXPERTS) < 3:
+    raise ValueError(f"Need at least 3 trained forecast experts, found {EXPECTED_EXPERTS}")
 
 weights_path = Path(manifest["ensemble"]["weights_json"])
 policy_path = Path(manifest["rl"]["policy_path"])
