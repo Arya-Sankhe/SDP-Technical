@@ -358,6 +358,10 @@ def save_json(path: Path, payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(to_serializable(payload), indent=2), encoding="utf-8")
 
 
+def load_json(path: Path) -> Dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def save_npz(path: Path, **arrays: Any) -> None:
     np.savez_compressed(path, **arrays)
 
