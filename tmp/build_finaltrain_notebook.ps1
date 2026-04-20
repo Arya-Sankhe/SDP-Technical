@@ -89,6 +89,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 import pandas_market_calendars as mcal
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -191,6 +192,7 @@ ENSEMBLE_DIR = ARTIFACT_ROOT / "ensemble"
 RL_DIR = ARTIFACT_ROOT / "rl"
 
 REFRESH_SHARED_SNAPSHOT = True
+RESUME_COMPLETED_EXPERTS = True
 SAVE_PARQUET_COMPRESSION = "snappy"
 REQUEST_CHUNK_DAYS = 5
 MAX_REQUESTS_PER_MINUTE = 120
@@ -379,6 +381,24 @@ def feature_columns_for_spec(spec: ExpertSpec) -> List[str]:
 
 def model_dir_for_spec(spec: ExpertSpec) -> Path:
     return ensure_dir(MODELS_DIR / spec.name)
+
+
+def expert_artifacts_complete(spec: ExpertSpec) -> bool:
+    expert_dir = MODELS_DIR / spec.name
+    required = [
+        expert_dir / "model.pt",
+        expert_dir / "scaler.npz",
+        expert_dir / "feature_manifest.json",
+        expert_dir / "train_config.json",
+        expert_dir / "inference_config.json",
+        expert_dir / "metrics.json",
+        expert_dir / "history.csv",
+        expert_dir / "rolling_predictions.npz",
+        expert_dir / "rolling_summary.csv",
+    ]
+    if spec.use_retrieval:
+        required.extend([expert_dir / "rag_database.npz", expert_dir / "rag_config.json"])
+    return all(path.exists() for path in required)
 
 
 def enforce_candle_validity(path: np.ndarray) -> np.ndarray:
@@ -1222,6 +1242,15 @@ def run_epoch(
     return float(np.mean(losses))
 
 
+def make_grad_scaler(enabled: bool):
+    if DEVICE.type != "cuda":
+        return None
+    try:
+        return torch.amp.GradScaler("cuda", enabled=enabled)
+    except Exception:
+        return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
 def train_model(
     spec: ExpertSpec,
     train_x: np.ndarray,
@@ -1242,7 +1271,7 @@ def train_model(
         patience=TRAINING_DEFAULTS["scheduler_patience"],
         min_lr=TRAINING_DEFAULTS["scheduler_min_lr"],
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=spec.amp_enabled and DEVICE.type == "cuda")
+    scaler = make_grad_scaler(enabled=spec.amp_enabled and DEVICE.type == "cuda")
 
     train_loader = DataLoader(MultiStepDataset(train_x, train_y), batch_size=spec.batch_size, shuffle=True, drop_last=False)
     val_loader = DataLoader(MultiStepDataset(val_x, val_y), batch_size=spec.eval_batch_size, shuffle=False, drop_last=False)
@@ -1459,12 +1488,11 @@ def run_walkforward_for_spec(feature_df: pd.DataFrame, spec: ExpertSpec) -> Dict
                 "slice_name": slice_cfg["name"],
                 "metrics": metrics,
                 "baseline_metrics": baseline_metrics,
-                "history": history_df,
-                "scaler": fold["scaler"],
-                "feature_columns": fold["feature_columns"],
                 "val_windows_used": limit,
             }
         )
+        model = model.to("cpu")
+        del model, history_df, fold, pred_paths, actual_paths, pred_paths_arr, actual_paths_arr, metrics, baseline_metrics
         clear_torch_memory()
     return {
         "slice_results": slice_results,
@@ -1521,7 +1549,6 @@ def train_production_model_for_spec(feature_df: pd.DataFrame, spec: ExpertSpec, 
         "scaler": prod_split["scaler"],
         "feature_columns": prod_split["feature_columns"],
         "retrieval_artifact": retrieval_artifact,
-        "split": prod_split,
     }
 
 
@@ -1725,6 +1752,11 @@ def save_expert_artifacts(
         "walkforward_summary": walkforward_results["summary"],
         "rolling_summary": rolling_payload["summary"],
     }
+
+
+def load_saved_rolling_arrays(rolling_predictions_path: Path) -> Dict[str, np.ndarray]:
+    with np.load(rolling_predictions_path) as payload:
+        return {key: payload[key] for key in payload.files}
 '@
 
 $cells += New-CodeCell @'
@@ -1748,6 +1780,27 @@ validation_rows: List[Dict[str, Any]] = []
 rolling_rows: List[Dict[str, Any]] = []
 
 for spec in FORECAST_SPECS:
+    if RESUME_COMPLETED_EXPERTS and expert_artifacts_complete(spec):
+        expert_dir = model_dir_for_spec(spec)
+        saved_metrics = load_json(expert_dir / "metrics.json")
+        print(f"Skipping {spec.version}; found complete saved artifacts in {expert_dir}")
+        EXPERT_ARTIFACTS[spec.name] = {
+            "spec": asdict(spec),
+            "artifact_dir": str(expert_dir),
+            "rolling_predictions_path": str(expert_dir / "rolling_predictions.npz"),
+            "walkforward_summary": saved_metrics["walkforward_summary"],
+            "rolling_summary": saved_metrics["rolling_summary"],
+            "artifact_info": {
+                "expert": spec.name,
+                "dir": expert_dir,
+                "walkforward_summary": saved_metrics["walkforward_summary"],
+                "rolling_summary": saved_metrics["rolling_summary"],
+            },
+        }
+        validation_rows.append({"expert": spec.name, **saved_metrics["walkforward_summary"]})
+        rolling_rows.append({"expert": spec.name, **saved_metrics["rolling_summary"]})
+        continue
+
     print(f"Training {spec.version} with lookback={spec.lookback}, feature_mode={spec.feature_mode}, architecture={spec.architecture}")
     feature_df = FEATURE_FRAMES[spec.feature_mode]
     walkforward_results = run_walkforward_for_spec(feature_df.iloc[:BACKTEST_CUTOFF_INDEX].reset_index(drop=True), spec)
@@ -1755,16 +1808,17 @@ for spec in FORECAST_SPECS:
     rolling_df, rolling_payload = run_rolling_for_spec(feature_df, spec, BACKTEST_DATE, production_bundle)
     artifact_info = save_expert_artifacts(spec, walkforward_results, production_bundle, rolling_df, rolling_payload, BACKTEST_DATE)
     EXPERT_ARTIFACTS[spec.name] = {
-        "spec": spec,
-        "feature_df": feature_df,
-        "walkforward": walkforward_results,
-        "production": production_bundle,
-        "rolling_df": rolling_df,
-        "rolling_payload": rolling_payload,
+        "spec": asdict(spec),
+        "artifact_dir": str(model_dir_for_spec(spec)),
+        "rolling_predictions_path": str(model_dir_for_spec(spec) / "rolling_predictions.npz"),
+        "walkforward_summary": walkforward_results["summary"],
+        "rolling_summary": rolling_payload["summary"],
         "artifact_info": artifact_info,
     }
     validation_rows.append({"expert": spec.name, **walkforward_results["summary"]})
     rolling_rows.append({"expert": spec.name, **rolling_payload["summary"]})
+    production_bundle["model"] = production_bundle["model"].to("cpu")
+    del production_bundle, rolling_df, rolling_payload, walkforward_results
     clear_torch_memory()
 
 validation_summary_df = pd.DataFrame(validation_rows).sort_values("expert").reset_index(drop=True)
@@ -1803,23 +1857,28 @@ def build_rl_market_frame(session_df: pd.DataFrame) -> pd.DataFrame:
 
 def build_aggregate_rolling_bundle(expert_artifacts: Dict[str, Dict[str, Any]], weights_df: pd.DataFrame) -> Dict[str, Any]:
     weight_map = {row["expert"]: float(row["weight"]) for _, row in weights_df.iterrows()}
-    reference = next(iter(expert_artifacts.values()))["rolling_payload"]["arrays"]
+    first_artifact = next(iter(expert_artifacts.values()))
+    reference = load_saved_rolling_arrays(Path(first_artifact["rolling_predictions_path"]))
     timestamps = reference["timestamps"]
     prev_close = reference["prev_close"]
 
     weighted_paths = []
     actual_paths = reference["actual_paths"]
     regime_indicators = []
+    loaded_payloads = {
+        expert_name: load_saved_rolling_arrays(Path(artifact["rolling_predictions_path"]))
+        for expert_name, artifact in expert_artifacts.items()
+    }
     for idx in range(len(timestamps)):
         combined_path = np.zeros((HORIZON, 4), dtype=np.float32)
         regime_vote = 0.0
         for expert_name, artifact in expert_artifacts.items():
             weight = weight_map[expert_name]
-            expert_timestamps = artifact["rolling_payload"]["arrays"]["timestamps"]
+            expert_timestamps = loaded_payloads[expert_name]["timestamps"]
             if not np.array_equal(expert_timestamps, timestamps):
                 raise RuntimeError("Rolling prediction timestamps are not aligned across experts.")
-            combined_path += weight * artifact["rolling_payload"]["arrays"]["predicted_paths"][idx]
-            regime_vote += weight * artifact["rolling_payload"]["arrays"]["regime_indicator"][idx]
+            combined_path += weight * loaded_payloads[expert_name]["predicted_paths"][idx]
+            regime_vote += weight * loaded_payloads[expert_name]["regime_indicator"][idx]
         weighted_paths.append(enforce_candle_validity(combined_path))
         regime_indicators.append(regime_vote)
     return {
