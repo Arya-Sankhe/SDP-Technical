@@ -100,7 +100,7 @@ from IPython.display import display
 from matplotlib import pyplot as plt
 from torch.distributions import Normal
 from torch.utils.data import DataLoader, Dataset
-from tqdm.auto import tqdm
+from tqdm import tqdm
 '@
 
 $cells += New-CodeCell @'

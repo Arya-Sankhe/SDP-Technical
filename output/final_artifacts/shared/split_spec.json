@@ -1,0 +1,18 @@
+{
+  "backtest_date": "2026-04-17",
+  "backtest_cutoff_index": 30472,
+  "walkforward_slices": [
+    {
+      "name": "slice_1",
+      "start": 0,
+      "end": 26233
+    },
+    {
+      "name": "slice_2",
+      "start": 4629,
+      "end": 30862
+    }
+  ],
+  "production_val_fraction": 0.1,
+  "validation_slice_fraction": 0.18
+}

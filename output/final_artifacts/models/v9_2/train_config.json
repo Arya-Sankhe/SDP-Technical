@@ -1,0 +1,48 @@
+{
+  "spec": {
+    "name": "v9_2",
+    "version": "v9.2",
+    "lookback": 256,
+    "feature_mode": "regime",
+    "architecture": "gru",
+    "ensemble_size": 20,
+    "batch_size": 256,
+    "eval_batch_size": 256,
+    "low_vram": false,
+    "amp_enabled": false,
+    "use_regime": true,
+    "use_retrieval": false,
+    "d_model": 128,
+    "n_heads": 4,
+    "n_layers": 2
+  },
+  "training_defaults": {
+    "hidden_size": 256,
+    "num_layers": 2,
+    "dropout": 0.2,
+    "learning_rate": 0.0005,
+    "weight_decay": 1e-05,
+    "teacher_forcing_decay": 0.95,
+    "gradient_clip_norm": 1.0,
+    "final_max_epochs": 60,
+    "final_patience": 12,
+    "sweep_max_epochs": 15,
+    "sweep_patience": 5,
+    "scheduler_factor": 0.5,
+    "scheduler_patience": 3,
+    "scheduler_min_lr": 1e-06,
+    "loss_weights": {
+      "range": 0.3,
+      "volatility": 0.5,
+      "directional": 0.1
+    }
+  },
+  "runtime": {
+    "created_at_utc": "2026-04-19T23:49:03Z",
+    "symbol": "MSFT",
+    "device": "cuda",
+    "gpu_mem_gb": 8.0,
+    "lookback_days": 120,
+    "horizon": 50
+  }
+}

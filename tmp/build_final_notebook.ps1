@@ -97,6 +97,7 @@ from alpaca.data.timeframe import TimeFrame
 from IPython.display import display
 from matplotlib import pyplot as plt
 from matplotlib.patches import Rectangle
+from tqdm import tqdm
 '@
 
 $cells += New-CodeCell @'

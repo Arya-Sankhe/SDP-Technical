@@ -1,0 +1,14 @@
+{
+  "created_at_utc": "2026-04-19T19:19:52Z",
+  "symbol": "MSFT",
+  "device": "cuda",
+  "gpu_mem_gb": 8.0,
+  "lookback_days": 120,
+  "horizon": 50,
+  "api_calls": 24,
+  "rows_raw": 31303,
+  "rows_sessionized": 30862,
+  "sessions_kept": 80,
+  "session_tz": "America/New_York",
+  "session_open_skip_bars": 6
+}

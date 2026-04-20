@@ -1,0 +1,27 @@
+{
+  "feature_mode": "regime",
+  "feature_columns": [
+    "rOpen",
+    "rHigh",
+    "rLow",
+    "rClose",
+    "logVolChange",
+    "logTradeCountChange",
+    "vwapDelta",
+    "rangeFrac",
+    "orderFlowProxy",
+    "tickPressure",
+    "atr_14",
+    "atr_14_pct",
+    "returns",
+    "turbulence_60",
+    "regime_indicator"
+  ],
+  "input_channels_with_impute": 16,
+  "target_columns": [
+    "rOpen",
+    "rHigh",
+    "rLow",
+    "rClose"
+  ]
+}
