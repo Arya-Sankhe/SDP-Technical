@@ -113,7 +113,8 @@ if torch.cuda.is_available():
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 LOW_VRAM_GPU = DEVICE.type == "cuda" and (torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)) <= 8.5
-SKIP_V9_3_ON_WINDOWS_8GB = os.name == "nt" and LOW_VRAM_GPU
+SKIP_HEAVY_EXPERTS_ON_WINDOWS_8GB = os.name == "nt" and LOW_VRAM_GPU
+SKIPPED_EXPERT_NAMES = {"v9_3", "v9_5"} if SKIP_HEAVY_EXPERTS_ON_WINDOWS_8GB else set()
 
 SYMBOL = "MSFT"
 LOOKBACK_DAYS = 120
@@ -302,13 +303,14 @@ FORECAST_SPECS = [
     ExpertSpec("v9_5", "v9.5", 256, "core", "gru_rag", ensemble_size=20, batch_size=256, eval_batch_size=256, use_retrieval=True),
 ]
 
-ACTIVE_FORECAST_SPECS = [spec for spec in FORECAST_SPECS if not (spec.name == "v9_3" and SKIP_V9_3_ON_WINDOWS_8GB)]
+ACTIVE_FORECAST_SPECS = [spec for spec in FORECAST_SPECS if spec.name not in SKIPPED_EXPERT_NAMES]
 
 print({
     "symbol": SYMBOL,
     "device": str(DEVICE),
     "low_vram_gpu": LOW_VRAM_GPU,
-    "skip_v9_3_on_windows_8gb": SKIP_V9_3_ON_WINDOWS_8GB,
+    "skip_heavy_experts_on_windows_8gb": SKIP_HEAVY_EXPERTS_ON_WINDOWS_8GB,
+    "skipped_experts": sorted(SKIPPED_EXPERT_NAMES),
     "artifact_root": str(ARTIFACT_ROOT),
     "forecast_experts": [spec.version for spec in ACTIVE_FORECAST_SPECS],
     "decision_layer": "v9.6 PPO",
