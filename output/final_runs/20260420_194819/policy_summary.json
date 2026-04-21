@@ -1,0 +1,35 @@
+{
+  "summary": {
+    "raw_action": 0.9962625503540039,
+    "policy_std": 0.9463307857513428,
+    "confidence_score": 0.5137872797988805,
+    "critic_value_estimate": 0.5162653923034668,
+    "aggregate_regime_name": "NORMAL",
+    "regime_scale": 1.0,
+    "recommended_position_pct": 0.9962625503540039,
+    "stance": "LONG"
+  },
+  "portfolio_state": {
+    "cash_norm": 1.0,
+    "shares_norm": 0.0,
+    "portfolio_value_norm": 1.0,
+    "position_pct": 0.0
+  },
+  "run_label": "20260420_194819",
+  "symbol": "MSFT",
+  "excluded_experts": [
+    "v9_2"
+  ],
+  "saved_weights": {
+    "v9_5": 0.30900305968164365,
+    "v9_1": 0.27129363142680357,
+    "v8_5": 0.2178821878899141,
+    "v9_2": 0.2018211210016388
+  },
+  "final_weights": {
+    "v8_5": 0.1,
+    "v9_1": 0.1,
+    "v9_5": 0.8
+  },
+  "aggregate_shrink": 0.85
+}

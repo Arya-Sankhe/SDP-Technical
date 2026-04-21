@@ -1,0 +1,26 @@
+{
+  "created_at_utc": "2026-04-20T19:54:19Z",
+  "symbol": "MSFT",
+  "anchor_timestamp": "2026-04-20 19:47:00+00:00",
+  "manifest_path": "output\\final_artifacts\\manifest.json",
+  "weights_path": "output\\final_artifacts\\ensemble\\weights.json",
+  "policy_path": "output\\final_artifacts\\rl\\policy.pt",
+  "excluded_experts": [
+    "v9_2"
+  ],
+  "saved_weights": {
+    "v9_5": 0.30900305968164365,
+    "v9_1": 0.27129363142680357,
+    "v8_5": 0.2178821878899141,
+    "v9_2": 0.2018211210016388
+  },
+  "final_weights": {
+    "v8_5": 0.1,
+    "v9_1": 0.1,
+    "v9_5": 0.8
+  },
+  "aggregate_shrink": 0.85,
+  "rolling_backtest_date": "2026-04-17",
+  "rolling_prediction_count": 334,
+  "rolling_frames_saved": 0
+}

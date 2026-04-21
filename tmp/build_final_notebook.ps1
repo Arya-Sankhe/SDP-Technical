@@ -140,7 +140,13 @@ FINAL_AGGREGATION_WEIGHT_PRIOR = {
     "v9_1": 0.10,
     "v9_5": 0.80,
 }
-FINAL_AGGREGATE_SHRINK = 0.85
+FINAL_AGGREGATE_SHRINK = 0.70
+FINAL_SOFT_SWING_GUARD_ENABLED = True
+FINAL_SOFT_SWING_GUARD_LOOKBACK = 120
+FINAL_SOFT_SWING_GUARD_Q95_MULT = 6.0
+FINAL_SOFT_SWING_GUARD_ATR_MULT = 1.75
+FINAL_SOFT_SWING_GUARD_MIN_MOVE = 1.20
+FINAL_SOFT_SWING_GUARD_EXCESS_SCALE = 0.55
 
 TARGET_COLUMNS = ["rOpen", "rHigh", "rLow", "rClose"]
 CORE_FEATURE_COLUMNS = [
@@ -233,6 +239,12 @@ print(
         "final_weight_prior_blend": FINAL_WEIGHT_PRIOR_BLEND,
         "final_excluded_experts": sorted(FINAL_EXCLUDED_EXPERTS),
         "final_aggregate_shrink": FINAL_AGGREGATE_SHRINK,
+        "final_soft_swing_guard_enabled": FINAL_SOFT_SWING_GUARD_ENABLED,
+        "final_soft_swing_guard_lookback": FINAL_SOFT_SWING_GUARD_LOOKBACK,
+        "final_soft_swing_guard_q95_mult": FINAL_SOFT_SWING_GUARD_Q95_MULT,
+        "final_soft_swing_guard_atr_mult": FINAL_SOFT_SWING_GUARD_ATR_MULT,
+        "final_soft_swing_guard_min_move": FINAL_SOFT_SWING_GUARD_MIN_MOVE,
+        "final_soft_swing_guard_excess_scale": FINAL_SOFT_SWING_GUARD_EXCESS_SCALE,
     }
 )
 '@
@@ -354,6 +366,86 @@ def shrink_path_to_anchor(path: np.ndarray, anchor_prev_close: float, shrink: fl
     anchor = float(anchor_prev_close)
     shrunk = anchor + float(shrink) * (np.asarray(path, dtype=np.float32) - anchor)
     return enforce_candle_validity(shrunk.astype(np.float32))
+
+
+def build_guard_history_slice(feature_df: pd.DataFrame, anchor_index: int, lookback: int) -> pd.DataFrame:
+    end = max(0, int(anchor_index))
+    start = max(0, end - int(lookback))
+    if end <= start:
+        return feature_df.iloc[max(0, end - 1) : end].copy()
+    return feature_df.iloc[start:end].copy()
+
+
+def compute_soft_swing_guard_cap(history_slice: pd.DataFrame) -> float:
+    if history_slice.empty:
+        return float(FINAL_SOFT_SWING_GUARD_MIN_MOVE)
+
+    if "prev_close" in history_slice.columns:
+        prev_close = history_slice["prev_close"].astype(float).copy()
+    else:
+        prev_close = history_slice["close"].shift(1).astype(float)
+        if len(prev_close) > 0:
+            fallback = float(history_slice["open"].iloc[0]) if "open" in history_slice.columns else float(history_slice["close"].iloc[0])
+            prev_close.iloc[0] = fallback
+
+    abs_close_move = (history_slice["close"].astype(float) - prev_close).abs()
+    abs_close_move = abs_close_move.replace([np.inf, -np.inf], np.nan).dropna()
+    q95_move = float(abs_close_move.quantile(0.95)) if len(abs_close_move) > 0 else 0.0
+
+    if "atr_14" in history_slice.columns:
+        atr_value = float(pd.Series(history_slice["atr_14"]).replace([np.inf, -np.inf], np.nan).ffill().bfill().iloc[-1])
+    else:
+        atr_value = 0.0
+
+    return float(
+        max(
+            FINAL_SOFT_SWING_GUARD_MIN_MOVE,
+            FINAL_SOFT_SWING_GUARD_Q95_MULT * q95_move,
+            FINAL_SOFT_SWING_GUARD_ATR_MULT * atr_value,
+        )
+    )
+
+
+def soft_cap_step_swings(path: np.ndarray, anchor_prev_close: float, step_move_cap: float, excess_scale: float) -> np.ndarray:
+    if step_move_cap <= 0.0:
+        return enforce_candle_validity(np.asarray(path, dtype=np.float32))
+    if not 0.0 < float(excess_scale) <= 1.0:
+        raise ValueError(f"Excess scale must be in (0, 1], got {excess_scale}")
+
+    guarded = np.asarray(path, dtype=np.float32).copy()
+    previous_close = float(anchor_prev_close)
+
+    for idx in range(len(guarded)):
+        candle = guarded[idx].copy()
+        close_delta = float(candle[3] - previous_close)
+        abs_delta = abs(close_delta)
+        if abs_delta > float(step_move_cap):
+            compressed_delta = math.copysign(
+                float(step_move_cap) + float(excess_scale) * (abs_delta - float(step_move_cap)),
+                close_delta,
+            )
+            shift = (previous_close + compressed_delta) - float(candle[3])
+            candle = candle + shift
+        guarded[idx] = candle
+        guarded[idx, 1] = max(float(guarded[idx, 1]), float(guarded[idx, 0]), float(guarded[idx, 3]))
+        guarded[idx, 2] = min(float(guarded[idx, 2]), float(guarded[idx, 0]), float(guarded[idx, 3]))
+        previous_close = float(guarded[idx, 3])
+
+    return enforce_candle_validity(guarded.astype(np.float32))
+
+
+def postprocess_aggregate_path(path: np.ndarray, anchor_prev_close: float, history_slice: pd.DataFrame) -> Tuple[np.ndarray, Optional[float]]:
+    processed = shrink_path_to_anchor(path, anchor_prev_close, FINAL_AGGREGATE_SHRINK)
+    guard_cap: Optional[float] = None
+    if FINAL_SOFT_SWING_GUARD_ENABLED:
+        guard_cap = compute_soft_swing_guard_cap(history_slice)
+        processed = soft_cap_step_swings(
+            processed,
+            anchor_prev_close=anchor_prev_close,
+            step_move_cap=guard_cap,
+            excess_scale=FINAL_SOFT_SWING_GUARD_EXCESS_SCALE,
+        )
+    return processed, guard_cap
 '@
 
 $cells += New-CodeCell @'
@@ -1223,12 +1315,18 @@ $cells += New-CodeCell @'
 aggregate_path_raw = np.zeros((HORIZON, 4), dtype=np.float32)
 aggregate_regime_indicator = 0.0
 aggregate_anchor_prev_close = float(list(EXPERT_PREDICTIONS.values())[0]["anchor_prev_close"])
+aggregate_anchor_index = len(FEATURE_FRAMES["technical"]) - 1
 for expert_name in EXPECTED_EXPERTS:
     weight = float(ensemble_weights[expert_name])
     aggregate_path_raw += weight * EXPERT_PREDICTIONS[expert_name]["path"]
     aggregate_regime_indicator += weight * EXPERT_PREDICTIONS[expert_name]["regime_indicator"]
 
-aggregate_path = shrink_path_to_anchor(aggregate_path_raw, aggregate_anchor_prev_close, FINAL_AGGREGATE_SHRINK)
+aggregate_guard_history = build_guard_history_slice(FEATURE_FRAMES["technical"], aggregate_anchor_index, FINAL_SOFT_SWING_GUARD_LOOKBACK)
+aggregate_path, aggregate_soft_swing_cap = postprocess_aggregate_path(
+    aggregate_path_raw,
+    aggregate_anchor_prev_close,
+    aggregate_guard_history,
+)
 aggregate_regime_name = regime_name_from_indicator(aggregate_regime_indicator)
 
 close_path_df = pd.DataFrame({"step": np.arange(1, HORIZON + 1)})
@@ -1248,6 +1346,8 @@ aggregate_summary_df = pd.DataFrame(
             "aggregate_regime_name": aggregate_regime_name,
             "aggregate_regime_indicator": float(aggregate_regime_indicator),
             "aggregate_shrink": float(FINAL_AGGREGATE_SHRINK),
+            "aggregate_soft_swing_guard_enabled": bool(FINAL_SOFT_SWING_GUARD_ENABLED),
+            "aggregate_soft_swing_cap": float(aggregate_soft_swing_cap) if aggregate_soft_swing_cap is not None else np.nan,
         }
     ]
 )
@@ -1379,6 +1479,7 @@ class FinalRollingLog:
     aggregate_path: np.ndarray
     expert_paths: Dict[str, np.ndarray]
     aggregate_regime_indicator: float
+    aggregate_soft_swing_cap: Optional[float]
     temperatures: Dict[str, float]
 
 
@@ -1530,10 +1631,11 @@ def build_final_rolling_logs(
             temperatures[expert_name] = float(expert_outputs[expert_name]["temperatures"][offset])
             aggregate_raw += float(ensemble_weights[expert_name]) * expert_path
             aggregate_regime_indicator += float(ensemble_weights[expert_name]) * float(expert_outputs[expert_name]["regime_indicators"][offset])
-        aggregate_path = shrink_path_to_anchor(
+        aggregate_guard_history = build_guard_history_slice(FEATURE_FRAMES["technical"], int(anchor_index), FINAL_SOFT_SWING_GUARD_LOOKBACK)
+        aggregate_path, aggregate_soft_swing_cap = postprocess_aggregate_path(
             aggregate_raw,
             float(actual_payload["prev_close"][offset]),
-            FINAL_AGGREGATE_SHRINK,
+            aggregate_guard_history,
         )
 
         logs.append(
@@ -1546,6 +1648,7 @@ def build_final_rolling_logs(
                 aggregate_path=aggregate_path,
                 expert_paths=expert_paths,
                 aggregate_regime_indicator=float(aggregate_regime_indicator),
+                aggregate_soft_swing_cap=aggregate_soft_swing_cap,
                 temperatures=temperatures,
             )
         )
@@ -1565,6 +1668,7 @@ def summarize_final_rolling_logs(logs: List[FinalRollingLog]) -> Tuple[pd.DataFr
             "anchor_prev_close": log.anchor_prev_close,
             "aggregate_regime_indicator": float(log.aggregate_regime_indicator),
             "aggregate_regime_name": regime_name_from_indicator(log.aggregate_regime_indicator),
+            "aggregate_soft_swing_cap": float(log.aggregate_soft_swing_cap) if log.aggregate_soft_swing_cap is not None else np.nan,
             "direction_hit": float(direction_hit),
             "path_mae": float(np.mean(np.abs(pred_close - actual_close))),
         }
@@ -1866,6 +1970,15 @@ if SAVE_RUN_OUTPUTS:
             "saved_weights": saved_ensemble_weights,
             "final_weights": ensemble_weights,
             "aggregate_shrink": FINAL_AGGREGATE_SHRINK,
+            "soft_swing_guard": {
+                "enabled": FINAL_SOFT_SWING_GUARD_ENABLED,
+                "lookback": FINAL_SOFT_SWING_GUARD_LOOKBACK,
+                "q95_mult": FINAL_SOFT_SWING_GUARD_Q95_MULT,
+                "atr_mult": FINAL_SOFT_SWING_GUARD_ATR_MULT,
+                "min_move": FINAL_SOFT_SWING_GUARD_MIN_MOVE,
+                "excess_scale": FINAL_SOFT_SWING_GUARD_EXCESS_SCALE,
+                "latest_cap": aggregate_soft_swing_cap,
+            },
         },
     )
     save_npz(
@@ -1900,6 +2013,15 @@ if SAVE_RUN_OUTPUTS:
             "saved_weights": saved_ensemble_weights,
             "final_weights": ensemble_weights,
             "aggregate_shrink": FINAL_AGGREGATE_SHRINK,
+            "soft_swing_guard": {
+                "enabled": FINAL_SOFT_SWING_GUARD_ENABLED,
+                "lookback": FINAL_SOFT_SWING_GUARD_LOOKBACK,
+                "q95_mult": FINAL_SOFT_SWING_GUARD_Q95_MULT,
+                "atr_mult": FINAL_SOFT_SWING_GUARD_ATR_MULT,
+                "min_move": FINAL_SOFT_SWING_GUARD_MIN_MOVE,
+                "excess_scale": FINAL_SOFT_SWING_GUARD_EXCESS_SCALE,
+                "latest_cap": aggregate_soft_swing_cap,
+            },
             "rolling_backtest_date": FINAL_ROLLING_BACKTEST_DATE,
             "rolling_prediction_count": len(FINAL_ROLLING_LOGS),
             "rolling_frames_saved": len(FINAL_ROLLING_SAVED_FRAMES),
