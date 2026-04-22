@@ -32,13 +32,18 @@ The current active experts are:
    - `v9.5 = 0.80`
 5. Post-process the aggregate forecast:
    - global shrink toward the anchor close: `0.70`
-   - soft swing guard:
+   - soft swing guard, step-to-step (two-tier graduated compression):
      - enabled
      - lookback `120`
-     - cap based on recent 1-minute move `q95 * 6.0`, `ATR14 * 1.75`, and a minimum move floor of `1.20`
-     - only the excess beyond the cap is compressed (`excess_scale = 0.55`)
+     - base cap from recent 1-minute move: `max(min_move=0.30, q95*2.5, ATR14*0.75)`
+     - tier 1 (`cap < |Δ_step| ≤ hard_mult * cap`, `hard_mult = 1.50`): mild compression, `excess_scale = 0.35`
+     - tier 2 (`|Δ_step| > hard_mult * cap`): aggressive squash, `extreme_scale = 0.05` (only 5% of excess beyond the hard cap is kept)
+   - anchor-distance soft envelope (two-tier, applied after the step-to-step guard):
+     - enabled
+     - at horizon step `k`, the cap on `|close_k - anchor_close|` is `sqrt(k) * step_cap * sqrt_scale` with `sqrt_scale = 1.0`
+     - tier 1 (`hard_mult = 1.50`, `excess_scale = 0.35`), tier 2 (`extreme_scale = 0.05`)
 
-That last step is important: normal predictions are left alone, while only unrealistic 1-minute jumps are scaled down.
+Together those steps keep normal 1-minute predictions untouched (`|Δ_step| ≤ cap`, `|close_k - anchor_close| ≤ sqrt(k) * step_cap`), soft-compress slightly-too-big moves, and aggressively squash clearly unrealistic single-minute jumps or cumulative drift away from the anchor close.
 
 ## Decision Layer
 
@@ -70,7 +75,7 @@ Latest saved run:
 - The system is now much better on path error than earlier runs, but direction accuracy is still weak. The latest `t+1` hit rate is below `50%`.
 - The final ensemble is effectively dominated by `v9.5`. That is helping accuracy, but it means the ensemble is not very diverse right now.
 - Because `v9.2` is excluded, the aggregate regime signal is effectively inactive in the current notebook. In practice, the final run is usually treated as `NORMAL`, so the PPO regime input is not adding much information.
-- The soft swing guard is a heuristic overlay, not a learned correction. It helps remove impossible 1-minute spikes, but it can also damp genuine fast moves.
+- The soft swing guard + anchor envelope are heuristic overlays, not learned corrections. They are tuned so normal 1-minute predictions pass through untouched, but because tier 2 squashes very large deltas hard, they can still damp genuine fast moves when those happen.
 - The rolling validation in the notebook is only a one-day backtest by default. That is useful for debugging, but not enough by itself to prove full robustness.
 - The final system still depends on live Alpaca data quality, sessionization, and feed consistency.
 
