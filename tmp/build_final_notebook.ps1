@@ -142,11 +142,31 @@ FINAL_AGGREGATION_WEIGHT_PRIOR = {
 }
 FINAL_AGGREGATE_SHRINK = 0.70
 FINAL_SOFT_SWING_GUARD_ENABLED = True
-FINAL_SOFT_SWING_GUARD_LOOKBACK = 120
-FINAL_SOFT_SWING_GUARD_Q95_MULT = 6.0
-FINAL_SOFT_SWING_GUARD_ATR_MULT = 1.75
-FINAL_SOFT_SWING_GUARD_MIN_MOVE = 1.20
-FINAL_SOFT_SWING_GUARD_EXCESS_SCALE = 0.55
+FINAL_SOFT_SWING_GUARD_LOOKBACK = 390
+FINAL_SOFT_SWING_GUARD_Q95_MULT = 1.35
+FINAL_SOFT_SWING_GUARD_ATR_MULT = 0.55
+FINAL_SOFT_SWING_GUARD_MIN_MOVE = 0.25
+FINAL_SOFT_SWING_GUARD_EXCESS_SCALE = 0.15
+FINAL_SOFT_SWING_GUARD_HARD_MULT = 1.10
+FINAL_SOFT_SWING_GUARD_EXTREME_SCALE = 0.01
+FINAL_EMPIRICAL_ENVELOPE_ENABLED = True
+FINAL_EMPIRICAL_ENVELOPE_LOOKBACK = 390
+FINAL_EMPIRICAL_ENVELOPE_Q95_MULT = 1.15
+FINAL_EMPIRICAL_ENVELOPE_STEP_BASE_MULT = 1.00
+FINAL_EMPIRICAL_ENVELOPE_ATR_MULT = 0.55
+FINAL_EMPIRICAL_ENVELOPE_MIN_MOVE = 0.25
+FINAL_EMPIRICAL_ENVELOPE_EXCESS_SCALE = 0.12
+FINAL_EMPIRICAL_ENVELOPE_HARD_MULT = 1.08
+FINAL_EMPIRICAL_ENVELOPE_EXTREME_SCALE = 0.01
+FINAL_CANDLE_RANGE_GUARD_ENABLED = True
+FINAL_CANDLE_RANGE_GUARD_LOOKBACK = 390
+FINAL_CANDLE_RANGE_GUARD_Q97_MULT = 1.35
+FINAL_CANDLE_RANGE_GUARD_MIN_WICK = 0.35
+FINAL_AGGREGATE_GUARD_LOOKBACK = max(
+    FINAL_SOFT_SWING_GUARD_LOOKBACK,
+    FINAL_EMPIRICAL_ENVELOPE_LOOKBACK,
+    FINAL_CANDLE_RANGE_GUARD_LOOKBACK,
+)
 
 TARGET_COLUMNS = ["rOpen", "rHigh", "rLow", "rClose"]
 CORE_FEATURE_COLUMNS = [
@@ -245,6 +265,22 @@ print(
         "final_soft_swing_guard_atr_mult": FINAL_SOFT_SWING_GUARD_ATR_MULT,
         "final_soft_swing_guard_min_move": FINAL_SOFT_SWING_GUARD_MIN_MOVE,
         "final_soft_swing_guard_excess_scale": FINAL_SOFT_SWING_GUARD_EXCESS_SCALE,
+        "final_soft_swing_guard_hard_mult": FINAL_SOFT_SWING_GUARD_HARD_MULT,
+        "final_soft_swing_guard_extreme_scale": FINAL_SOFT_SWING_GUARD_EXTREME_SCALE,
+        "final_empirical_envelope_enabled": FINAL_EMPIRICAL_ENVELOPE_ENABLED,
+        "final_empirical_envelope_lookback": FINAL_EMPIRICAL_ENVELOPE_LOOKBACK,
+        "final_empirical_envelope_q95_mult": FINAL_EMPIRICAL_ENVELOPE_Q95_MULT,
+        "final_empirical_envelope_step_base_mult": FINAL_EMPIRICAL_ENVELOPE_STEP_BASE_MULT,
+        "final_empirical_envelope_atr_mult": FINAL_EMPIRICAL_ENVELOPE_ATR_MULT,
+        "final_empirical_envelope_min_move": FINAL_EMPIRICAL_ENVELOPE_MIN_MOVE,
+        "final_empirical_envelope_excess_scale": FINAL_EMPIRICAL_ENVELOPE_EXCESS_SCALE,
+        "final_empirical_envelope_hard_mult": FINAL_EMPIRICAL_ENVELOPE_HARD_MULT,
+        "final_empirical_envelope_extreme_scale": FINAL_EMPIRICAL_ENVELOPE_EXTREME_SCALE,
+        "final_candle_range_guard_enabled": FINAL_CANDLE_RANGE_GUARD_ENABLED,
+        "final_candle_range_guard_lookback": FINAL_CANDLE_RANGE_GUARD_LOOKBACK,
+        "final_candle_range_guard_q97_mult": FINAL_CANDLE_RANGE_GUARD_Q97_MULT,
+        "final_candle_range_guard_min_wick": FINAL_CANDLE_RANGE_GUARD_MIN_WICK,
+        "final_aggregate_guard_lookback": FINAL_AGGREGATE_GUARD_LOOKBACK,
     }
 )
 '@
@@ -376,6 +412,38 @@ def build_guard_history_slice(feature_df: pd.DataFrame, anchor_index: int, lookb
     return feature_df.iloc[start:end].copy()
 
 
+def _latest_atr_value(history_slice: pd.DataFrame) -> float:
+    if history_slice.empty:
+        return 0.0
+    if "atr_14" in history_slice.columns:
+        atr_series = pd.Series(history_slice["atr_14"], dtype="float64").replace([np.inf, -np.inf], np.nan).ffill().bfill()
+        if len(atr_series) > 0 and pd.notna(atr_series.iloc[-1]):
+            return float(atr_series.iloc[-1])
+
+    if not {"high", "low", "close"}.issubset(history_slice.columns):
+        return 0.0
+
+    if "prev_close" in history_slice.columns:
+        prev_close = pd.Series(history_slice["prev_close"], dtype="float64").copy()
+    else:
+        prev_close = pd.Series(history_slice["close"], dtype="float64").shift(1)
+        if len(prev_close) > 0:
+            fallback = float(history_slice["open"].iloc[0]) if "open" in history_slice.columns else float(history_slice["close"].iloc[0])
+            prev_close.iloc[0] = fallback
+
+    tr_components = pd.concat(
+        [
+            (pd.Series(history_slice["high"], dtype="float64") - pd.Series(history_slice["low"], dtype="float64")).abs(),
+            (pd.Series(history_slice["high"], dtype="float64") - prev_close).abs(),
+            (pd.Series(history_slice["low"], dtype="float64") - prev_close).abs(),
+        ],
+        axis=1,
+    )
+    atr_series = tr_components.max(axis=1).rolling(14, min_periods=1).mean()
+    atr_series = atr_series.replace([np.inf, -np.inf], np.nan).ffill().bfill()
+    return float(atr_series.iloc[-1]) if len(atr_series) > 0 else 0.0
+
+
 def compute_soft_swing_guard_cap(history_slice: pd.DataFrame) -> float:
     if history_slice.empty:
         return float(FINAL_SOFT_SWING_GUARD_MIN_MOVE)
@@ -392,10 +460,7 @@ def compute_soft_swing_guard_cap(history_slice: pd.DataFrame) -> float:
     abs_close_move = abs_close_move.replace([np.inf, -np.inf], np.nan).dropna()
     q95_move = float(abs_close_move.quantile(0.95)) if len(abs_close_move) > 0 else 0.0
 
-    if "atr_14" in history_slice.columns:
-        atr_value = float(pd.Series(history_slice["atr_14"]).replace([np.inf, -np.inf], np.nan).ffill().bfill().iloc[-1])
-    else:
-        atr_value = 0.0
+    atr_value = _latest_atr_value(history_slice)
 
     return float(
         max(
@@ -406,30 +471,151 @@ def compute_soft_swing_guard_cap(history_slice: pd.DataFrame) -> float:
     )
 
 
-def soft_cap_step_swings(path: np.ndarray, anchor_prev_close: float, step_move_cap: float, excess_scale: float) -> np.ndarray:
+def _compress_abs_move(abs_move: float, cap: float, excess_scale: float, hard_mult: float, extreme_scale: float) -> float:
+    cap = float(cap)
+    if abs_move <= cap:
+        return float(abs_move)
+    hard_cap = cap * float(hard_mult)
+    soft_ceiling = cap + float(excess_scale) * (hard_cap - cap)
+    if abs_move <= hard_cap:
+        return float(cap + float(excess_scale) * (abs_move - cap))
+    return float(soft_ceiling + float(extreme_scale) * (abs_move - hard_cap))
+
+
+def _shift_candle_close(candle: np.ndarray, new_close: float) -> np.ndarray:
+    shifted = np.asarray(candle, dtype=np.float32).copy()
+    shift = float(new_close) - float(shifted[3])
+    shifted = shifted + shift
+    shifted[1] = max(float(shifted[1]), float(shifted[0]), float(shifted[3]))
+    shifted[2] = min(float(shifted[2]), float(shifted[0]), float(shifted[3]))
+    return shifted.astype(np.float32)
+
+
+def soft_cap_step_swings(
+    path: np.ndarray,
+    anchor_prev_close: float,
+    step_move_cap: float,
+    excess_scale: float,
+    hard_mult: float = 1.10,
+    extreme_scale: float = 0.01,
+) -> np.ndarray:
     if step_move_cap <= 0.0:
         return enforce_candle_validity(np.asarray(path, dtype=np.float32))
     if not 0.0 < float(excess_scale) <= 1.0:
         raise ValueError(f"Excess scale must be in (0, 1], got {excess_scale}")
+    if float(hard_mult) < 1.0:
+        raise ValueError(f"Hard multiplier must be >= 1.0, got {hard_mult}")
+    if not 0.0 <= float(extreme_scale) <= 1.0:
+        raise ValueError(f"Extreme scale must be in [0, 1], got {extreme_scale}")
 
     guarded = np.asarray(path, dtype=np.float32).copy()
     previous_close = float(anchor_prev_close)
+    cap = float(step_move_cap)
 
     for idx in range(len(guarded)):
         candle = guarded[idx].copy()
         close_delta = float(candle[3] - previous_close)
         abs_delta = abs(close_delta)
-        if abs_delta > float(step_move_cap):
+        if abs_delta > cap:
             compressed_delta = math.copysign(
-                float(step_move_cap) + float(excess_scale) * (abs_delta - float(step_move_cap)),
+                _compress_abs_move(abs_delta, cap, excess_scale, hard_mult, extreme_scale),
                 close_delta,
             )
-            shift = (previous_close + compressed_delta) - float(candle[3])
-            candle = candle + shift
+            candle = _shift_candle_close(candle, previous_close + compressed_delta)
         guarded[idx] = candle
-        guarded[idx, 1] = max(float(guarded[idx, 1]), float(guarded[idx, 0]), float(guarded[idx, 3]))
-        guarded[idx, 2] = min(float(guarded[idx, 2]), float(guarded[idx, 0]), float(guarded[idx, 3]))
         previous_close = float(guarded[idx, 3])
+
+    return enforce_candle_validity(guarded.astype(np.float32))
+
+
+def compute_empirical_horizon_caps(history_slice: pd.DataFrame, horizon: int, base_step_cap: float) -> np.ndarray:
+    if history_slice.empty:
+        return np.full(horizon, float(FINAL_EMPIRICAL_ENVELOPE_MIN_MOVE), dtype=np.float32)
+
+    closes = pd.Series(history_slice["close"], dtype="float64").replace([np.inf, -np.inf], np.nan).dropna().reset_index(drop=True)
+    atr_value = _latest_atr_value(history_slice)
+    close_values = closes.to_numpy(dtype=np.float64)
+    caps: List[float] = []
+
+    for step_k in range(1, horizon + 1):
+        q95_move = 0.0
+        if len(close_values) > step_k:
+            step_moves = np.abs(close_values[step_k:] - close_values[:-step_k])
+            if len(step_moves) > 0:
+                q95_move = float(np.quantile(step_moves, 0.95))
+        cap = max(
+            float(FINAL_EMPIRICAL_ENVELOPE_MIN_MOVE) * math.sqrt(float(step_k)),
+            float(FINAL_EMPIRICAL_ENVELOPE_Q95_MULT) * q95_move,
+            float(FINAL_EMPIRICAL_ENVELOPE_STEP_BASE_MULT) * float(base_step_cap) * math.sqrt(float(step_k)),
+            float(FINAL_EMPIRICAL_ENVELOPE_ATR_MULT) * float(atr_value) * math.sqrt(float(step_k)),
+        )
+        caps.append(float(cap))
+
+    return np.asarray(caps, dtype=np.float32)
+
+
+def empirical_anchor_envelope_cap_path(
+    path: np.ndarray,
+    anchor_prev_close: float,
+    horizon_caps: np.ndarray,
+    excess_scale: float = 0.12,
+    hard_mult: float = 1.08,
+    extreme_scale: float = 0.01,
+) -> np.ndarray:
+    if not 0.0 < float(excess_scale) <= 1.0:
+        raise ValueError(f"Excess scale must be in (0, 1], got {excess_scale}")
+    if float(hard_mult) < 1.0:
+        raise ValueError(f"Hard multiplier must be >= 1.0, got {hard_mult}")
+    if not 0.0 <= float(extreme_scale) <= 1.0:
+        raise ValueError(f"Extreme scale must be in [0, 1], got {extreme_scale}")
+
+    guarded = np.asarray(path, dtype=np.float32).copy()
+    anchor = float(anchor_prev_close)
+    caps = np.asarray(horizon_caps, dtype=np.float32)
+
+    for idx in range(len(guarded)):
+        candle = guarded[idx].copy()
+        cap = float(caps[min(idx, len(caps) - 1)])
+        close_delta = float(candle[3] - anchor)
+        abs_delta = abs(close_delta)
+        if abs_delta > cap:
+            compressed_delta = math.copysign(
+                _compress_abs_move(abs_delta, cap, excess_scale, hard_mult, extreme_scale),
+                close_delta,
+            )
+            candle = _shift_candle_close(candle, anchor + compressed_delta)
+        guarded[idx] = candle
+
+    return enforce_candle_validity(guarded.astype(np.float32))
+
+
+def cap_candle_ranges(path: np.ndarray, history_slice: pd.DataFrame) -> np.ndarray:
+    if history_slice.empty:
+        return enforce_candle_validity(np.asarray(path, dtype=np.float32))
+    if not {"high", "low"}.issubset(history_slice.columns):
+        return enforce_candle_validity(np.asarray(path, dtype=np.float32))
+
+    recent_range = (
+        pd.Series(history_slice["high"], dtype="float64") - pd.Series(history_slice["low"], dtype="float64")
+    ).abs().replace([np.inf, -np.inf], np.nan).dropna()
+    if len(recent_range) == 0:
+        range_cap = float(FINAL_CANDLE_RANGE_GUARD_MIN_WICK)
+    else:
+        range_cap = max(
+            float(FINAL_CANDLE_RANGE_GUARD_MIN_WICK),
+            float(FINAL_CANDLE_RANGE_GUARD_Q97_MULT) * float(recent_range.quantile(0.97)),
+        )
+
+    guarded = np.asarray(path, dtype=np.float32).copy()
+    for idx in range(len(guarded)):
+        candle = guarded[idx].copy()
+        body_high = max(float(candle[0]), float(candle[3]))
+        body_low = min(float(candle[0]), float(candle[3]))
+        candle[1] = min(float(candle[1]), body_high + float(range_cap))
+        candle[2] = max(float(candle[2]), body_low - float(range_cap))
+        candle[1] = max(float(candle[1]), float(candle[0]), float(candle[3]))
+        candle[2] = min(float(candle[2]), float(candle[0]), float(candle[3]))
+        guarded[idx] = candle
 
     return enforce_candle_validity(guarded.astype(np.float32))
 
@@ -444,7 +630,29 @@ def postprocess_aggregate_path(path: np.ndarray, anchor_prev_close: float, histo
             anchor_prev_close=anchor_prev_close,
             step_move_cap=guard_cap,
             excess_scale=FINAL_SOFT_SWING_GUARD_EXCESS_SCALE,
+            hard_mult=FINAL_SOFT_SWING_GUARD_HARD_MULT,
+            extreme_scale=FINAL_SOFT_SWING_GUARD_EXTREME_SCALE,
         )
+        if FINAL_EMPIRICAL_ENVELOPE_ENABLED:
+            horizon_caps = compute_empirical_horizon_caps(history_slice, horizon=len(processed), base_step_cap=guard_cap)
+            processed = empirical_anchor_envelope_cap_path(
+                processed,
+                anchor_prev_close=anchor_prev_close,
+                horizon_caps=horizon_caps,
+                excess_scale=FINAL_EMPIRICAL_ENVELOPE_EXCESS_SCALE,
+                hard_mult=FINAL_EMPIRICAL_ENVELOPE_HARD_MULT,
+                extreme_scale=FINAL_EMPIRICAL_ENVELOPE_EXTREME_SCALE,
+            )
+            processed = soft_cap_step_swings(
+                processed,
+                anchor_prev_close=anchor_prev_close,
+                step_move_cap=guard_cap,
+                excess_scale=FINAL_SOFT_SWING_GUARD_EXCESS_SCALE,
+                hard_mult=FINAL_SOFT_SWING_GUARD_HARD_MULT,
+                extreme_scale=FINAL_SOFT_SWING_GUARD_EXTREME_SCALE,
+            )
+        if FINAL_CANDLE_RANGE_GUARD_ENABLED:
+            processed = cap_candle_ranges(processed, history_slice)
     return processed, guard_cap
 '@
 
@@ -1321,7 +1529,7 @@ for expert_name in EXPECTED_EXPERTS:
     aggregate_path_raw += weight * EXPERT_PREDICTIONS[expert_name]["path"]
     aggregate_regime_indicator += weight * EXPERT_PREDICTIONS[expert_name]["regime_indicator"]
 
-aggregate_guard_history = build_guard_history_slice(FEATURE_FRAMES["technical"], aggregate_anchor_index, FINAL_SOFT_SWING_GUARD_LOOKBACK)
+aggregate_guard_history = build_guard_history_slice(FEATURE_FRAMES["technical"], aggregate_anchor_index, FINAL_AGGREGATE_GUARD_LOOKBACK)
 aggregate_path, aggregate_soft_swing_cap = postprocess_aggregate_path(
     aggregate_path_raw,
     aggregate_anchor_prev_close,
@@ -1348,6 +1556,8 @@ aggregate_summary_df = pd.DataFrame(
             "aggregate_shrink": float(FINAL_AGGREGATE_SHRINK),
             "aggregate_soft_swing_guard_enabled": bool(FINAL_SOFT_SWING_GUARD_ENABLED),
             "aggregate_soft_swing_cap": float(aggregate_soft_swing_cap) if aggregate_soft_swing_cap is not None else np.nan,
+            "aggregate_empirical_envelope_enabled": bool(FINAL_EMPIRICAL_ENVELOPE_ENABLED),
+            "aggregate_candle_range_guard_enabled": bool(FINAL_CANDLE_RANGE_GUARD_ENABLED),
         }
     ]
 )
@@ -1631,7 +1841,7 @@ def build_final_rolling_logs(
             temperatures[expert_name] = float(expert_outputs[expert_name]["temperatures"][offset])
             aggregate_raw += float(ensemble_weights[expert_name]) * expert_path
             aggregate_regime_indicator += float(ensemble_weights[expert_name]) * float(expert_outputs[expert_name]["regime_indicators"][offset])
-        aggregate_guard_history = build_guard_history_slice(FEATURE_FRAMES["technical"], int(anchor_index), FINAL_SOFT_SWING_GUARD_LOOKBACK)
+        aggregate_guard_history = build_guard_history_slice(FEATURE_FRAMES["technical"], int(anchor_index), FINAL_AGGREGATE_GUARD_LOOKBACK)
         aggregate_path, aggregate_soft_swing_cap = postprocess_aggregate_path(
             aggregate_raw,
             float(actual_payload["prev_close"][offset]),
@@ -1977,7 +2187,26 @@ if SAVE_RUN_OUTPUTS:
                 "atr_mult": FINAL_SOFT_SWING_GUARD_ATR_MULT,
                 "min_move": FINAL_SOFT_SWING_GUARD_MIN_MOVE,
                 "excess_scale": FINAL_SOFT_SWING_GUARD_EXCESS_SCALE,
+                "hard_mult": FINAL_SOFT_SWING_GUARD_HARD_MULT,
+                "extreme_scale": FINAL_SOFT_SWING_GUARD_EXTREME_SCALE,
                 "latest_cap": aggregate_soft_swing_cap,
+            },
+            "empirical_envelope": {
+                "enabled": FINAL_EMPIRICAL_ENVELOPE_ENABLED,
+                "lookback": FINAL_EMPIRICAL_ENVELOPE_LOOKBACK,
+                "q95_mult": FINAL_EMPIRICAL_ENVELOPE_Q95_MULT,
+                "step_base_mult": FINAL_EMPIRICAL_ENVELOPE_STEP_BASE_MULT,
+                "atr_mult": FINAL_EMPIRICAL_ENVELOPE_ATR_MULT,
+                "min_move": FINAL_EMPIRICAL_ENVELOPE_MIN_MOVE,
+                "excess_scale": FINAL_EMPIRICAL_ENVELOPE_EXCESS_SCALE,
+                "hard_mult": FINAL_EMPIRICAL_ENVELOPE_HARD_MULT,
+                "extreme_scale": FINAL_EMPIRICAL_ENVELOPE_EXTREME_SCALE,
+            },
+            "candle_range_guard": {
+                "enabled": FINAL_CANDLE_RANGE_GUARD_ENABLED,
+                "lookback": FINAL_CANDLE_RANGE_GUARD_LOOKBACK,
+                "q97_mult": FINAL_CANDLE_RANGE_GUARD_Q97_MULT,
+                "min_wick": FINAL_CANDLE_RANGE_GUARD_MIN_WICK,
             },
         },
     )
@@ -2020,7 +2249,26 @@ if SAVE_RUN_OUTPUTS:
                 "atr_mult": FINAL_SOFT_SWING_GUARD_ATR_MULT,
                 "min_move": FINAL_SOFT_SWING_GUARD_MIN_MOVE,
                 "excess_scale": FINAL_SOFT_SWING_GUARD_EXCESS_SCALE,
+                "hard_mult": FINAL_SOFT_SWING_GUARD_HARD_MULT,
+                "extreme_scale": FINAL_SOFT_SWING_GUARD_EXTREME_SCALE,
                 "latest_cap": aggregate_soft_swing_cap,
+            },
+            "empirical_envelope": {
+                "enabled": FINAL_EMPIRICAL_ENVELOPE_ENABLED,
+                "lookback": FINAL_EMPIRICAL_ENVELOPE_LOOKBACK,
+                "q95_mult": FINAL_EMPIRICAL_ENVELOPE_Q95_MULT,
+                "step_base_mult": FINAL_EMPIRICAL_ENVELOPE_STEP_BASE_MULT,
+                "atr_mult": FINAL_EMPIRICAL_ENVELOPE_ATR_MULT,
+                "min_move": FINAL_EMPIRICAL_ENVELOPE_MIN_MOVE,
+                "excess_scale": FINAL_EMPIRICAL_ENVELOPE_EXCESS_SCALE,
+                "hard_mult": FINAL_EMPIRICAL_ENVELOPE_HARD_MULT,
+                "extreme_scale": FINAL_EMPIRICAL_ENVELOPE_EXTREME_SCALE,
+            },
+            "candle_range_guard": {
+                "enabled": FINAL_CANDLE_RANGE_GUARD_ENABLED,
+                "lookback": FINAL_CANDLE_RANGE_GUARD_LOOKBACK,
+                "q97_mult": FINAL_CANDLE_RANGE_GUARD_Q97_MULT,
+                "min_wick": FINAL_CANDLE_RANGE_GUARD_MIN_WICK,
             },
             "rolling_backtest_date": FINAL_ROLLING_BACKTEST_DATE,
             "rolling_prediction_count": len(FINAL_ROLLING_LOGS),
