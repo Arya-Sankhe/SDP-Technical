@@ -1,0 +1,8 @@
+metric,value
+prediction_count,60.0
+directional_hit_rate_t1,0.5166666666666667
+aggregate_path_mae,15.45760512749354
+aggregate_step_1_close_mae,7.056169637044271
+aggregate_step_3_close_mae,13.450781758626302
+aggregate_step_5_close_mae,18.348741149902345
+aggregate_step_7_close_mae,21.793944295247396
