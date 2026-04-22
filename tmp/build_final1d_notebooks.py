@@ -902,11 +902,14 @@ FINAL_ROLLING_STEP = 1
 FINAL_ROLLING_BACKTEST_DATE = None
 FINAL_ROLLING_WINDOW = 60
 FINAL_ROLLING_HISTORY_BARS = 180
-FINAL_ROLLING_SAVE_FRAMES = False
+FINAL_ROLLING_SAVE_FRAMES = True
 FINAL_ROLLING_DISPLAY_FRAME_INDEX = -1
 FINAL_ROLLING_USE_CPU_ON_LOW_VRAM = LOW_VRAM_GPU
 FINAL_ROLLING_DEVICE = torch.device("cpu") if FINAL_ROLLING_USE_CPU_ON_LOW_VRAM else DEVICE
 FINAL_ROLLING_CLEAR_EVERY = 24
+FINAL_ROLLING_FRAME_FILENAME_PATTERN = "frame_{:04d}.png"
+FINAL_ROLLING_FRAME_DPI = 180
+FINAL_ROLLING_FRAME_FIGSIZE = (18, 8)
 FINAL_WEIGHT_PRIOR_BLEND = 0.0
 FINAL_EXCLUDED_EXPERTS = set()
 FINAL_AGGREGATION_WEIGHT_PRIOR = {
@@ -1049,6 +1052,8 @@ print(
         "save_run_outputs": SAVE_RUN_OUTPUTS,
         "final_rolling_window": FINAL_ROLLING_WINDOW,
         "final_rolling_save_frames": FINAL_ROLLING_SAVE_FRAMES,
+        "final_rolling_frame_filename_pattern": FINAL_ROLLING_FRAME_FILENAME_PATTERN,
+        "final_rolling_frame_dpi": FINAL_ROLLING_FRAME_DPI,
         "final_rolling_device": str(FINAL_ROLLING_DEVICE),
         "final_weight_prior_blend": FINAL_WEIGHT_PRIOR_BLEND,
         "final_excluded_experts": sorted(FINAL_EXCLUDED_EXPERTS),
@@ -1239,7 +1244,7 @@ display(session_df.tail())
 
 INFER_CELL15 = """## Daily Rolling Backtest
 
-This section replays a strictly causal rolling daily window using the frozen expert artifacts. For each anchor day, every expert predicts from its own feature block, the saved ensemble weights form the aggregate OHLC path, and the individual expert paths are shown as close-line overlays.
+This section replays a strictly causal rolling daily window using the frozen expert artifacts. For each anchor day, every expert predicts from its own feature block, the saved ensemble weights form the aggregate OHLC path, and a standalone PNG frame is generated for each rolling prediction inside the run's `rolling_frames/` folder.
 """
 
 
@@ -1253,6 +1258,8 @@ print(
         "final_rolling_backtest_date": FINAL_ROLLING_BACKTEST_DATE,
         "final_rolling_history_bars": FINAL_ROLLING_HISTORY_BARS,
         "final_rolling_save_frames": FINAL_ROLLING_SAVE_FRAMES,
+        "final_rolling_frame_filename_pattern": FINAL_ROLLING_FRAME_FILENAME_PATTERN,
+        "final_rolling_frame_dpi": FINAL_ROLLING_FRAME_DPI,
         "final_rolling_device": str(FINAL_ROLLING_DEVICE),
         "final_rolling_clear_every": FINAL_ROLLING_CLEAR_EVERY,
         "max_rolling_lookback": MAX_ROLLING_LOOKBACK,
@@ -1524,14 +1531,20 @@ def _draw_rolling_candles(
         ax.add_patch(rect)
 
 
-def render_final_rolling_frame(log: FinalRollingLog, pricedf: pd.DataFrame, history_bars: int = FINAL_ROLLING_HISTORY_BARS) -> plt.Figure:
+def render_final_rolling_frame(
+    log: FinalRollingLog,
+    pricedf: pd.DataFrame,
+    history_bars: int = FINAL_ROLLING_HISTORY_BARS,
+    frame_idx: Optional[int] = None,
+    total_frames: Optional[int] = None,
+) -> plt.Figure:
     history_start = max(0, log.anchor_index - history_bars)
     history_df = pricedf.iloc[history_start : log.anchor_index][["timestamp", "open", "high", "low", "close"]].copy()
     history_ohlc = history_df.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"}).set_index("timestamp")
     actual_ohlc = _rolling_candle_frame(log.actual_path, log.future_timestamps)
     aggregate_ohlc = _rolling_candle_frame(log.aggregate_path, log.future_timestamps)
 
-    fig, ax = plt.subplots(figsize=(18, 8), facecolor="black")
+    fig, ax = plt.subplots(figsize=FINAL_ROLLING_FRAME_FIGSIZE, facecolor="black")
     FigureCanvasAgg(fig)
     ax.set_facecolor("black")
 
@@ -1618,8 +1631,23 @@ def render_final_rolling_frame(log: FinalRollingLog, pricedf: pd.DataFrame, hist
         f"{SYMBOL} 1D Final Rolling | Anchor: {log.anchor_timestamp.tz_convert(SESSION_TZ).strftime('%Y-%m-%d')} | "
         f"Regime: {regime_name_from_indicator(log.aggregate_regime_indicator)}"
     )
+    if frame_idx is not None and total_frames is not None:
+        header = header + f" | Frame {frame_idx + 1}/{total_frames}"
     ax.set_title(header, color="white", pad=12)
     ax.set_ylabel("Price", color="white")
+
+    if frame_idx is not None and total_frames is not None:
+        ax.text(
+            0.01,
+            0.99,
+            f"Frame {frame_idx + 1}/{total_frames}",
+            transform=ax.transAxes,
+            va="top",
+            ha="left",
+            color="white",
+            fontsize=10,
+            bbox=dict(facecolor="black", edgecolor="#666666", alpha=0.8, boxstyle="round,pad=0.25"),
+        )
 
     legend_handles = [
         Patch(facecolor="#00FF00", edgecolor="#00FF00", label="History (bull)"),
@@ -1640,12 +1668,23 @@ def render_final_rolling_frame(log: FinalRollingLog, pricedf: pd.DataFrame, hist
 def generate_final_rolling_frames(logs: List[FinalRollingLog], pricedf: pd.DataFrame, output_dir: Path) -> List[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     saved_paths: List[Path] = []
-    for idx, log in enumerate(tqdm(logs, desc="Saving final rolling frames")):
-        fig = render_final_rolling_frame(log, pricedf, history_bars=FINAL_ROLLING_HISTORY_BARS)
-        output_path = output_dir / f"frame_{idx:04d}.png"
-        fig.savefig(output_path, dpi=180, facecolor="black", bbox_inches="tight")
+    total = len(logs)
+    pbar = tqdm(total=total, desc=f"Saving frame 0/{total}")
+    for idx, log in enumerate(logs):
+        fig = render_final_rolling_frame(
+            log,
+            pricedf,
+            history_bars=FINAL_ROLLING_HISTORY_BARS,
+            frame_idx=idx,
+            total_frames=total,
+        )
+        output_path = output_dir / FINAL_ROLLING_FRAME_FILENAME_PATTERN.format(idx)
+        fig.savefig(output_path, dpi=FINAL_ROLLING_FRAME_DPI, facecolor="black", bbox_inches="tight")
         saved_paths.append(output_path)
-        plt.close(fig)
+        plt.close("all")
+        pbar.set_description(f"Saving frame {idx + 1}/{total}")
+        pbar.update(1)
+    pbar.close()
     return saved_paths
 """
 
@@ -1714,6 +1753,8 @@ FINAL_ROLLING_PREVIEW_FIG = render_final_rolling_frame(
     FINAL_ROLLING_LOGS[preview_index],
     pricedf=session_df,
     history_bars=FINAL_ROLLING_HISTORY_BARS,
+    frame_idx=preview_index,
+    total_frames=len(FINAL_ROLLING_LOGS),
 )
 plt.show()
 
@@ -1728,6 +1769,8 @@ if FINAL_ROLLING_SAVE_FRAMES:
         {
             "rolling_frames_dir": str(FINAL_ROLLING_FRAME_OUTPUT_DIR),
             "rolling_frames_saved": len(FINAL_ROLLING_SAVED_FRAMES),
+            "first_frame": FINAL_ROLLING_SAVED_FRAMES[0].name if FINAL_ROLLING_SAVED_FRAMES else None,
+            "last_frame": FINAL_ROLLING_SAVED_FRAMES[-1].name if FINAL_ROLLING_SAVED_FRAMES else None,
         }
     )
 """
