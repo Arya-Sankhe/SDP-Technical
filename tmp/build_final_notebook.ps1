@@ -167,6 +167,25 @@ FINAL_AGGREGATE_GUARD_LOOKBACK = max(
     FINAL_EMPIRICAL_ENVELOPE_LOOKBACK,
     FINAL_CANDLE_RANGE_GUARD_LOOKBACK,
 )
+FINAL_T1_TEMPORAL_GUARD_ENABLED = True
+FINAL_T1_TEMPORAL_GUARD_LOOKBACK = 390
+FINAL_T1_TEMPORAL_Q95_MULT = 1.10
+FINAL_T1_TEMPORAL_ATR_MULT = 0.45
+FINAL_T1_TEMPORAL_MIN_MOVE = 0.22
+FINAL_T1_TEMPORAL_EXCESS_SCALE = 0.10
+FINAL_T1_TEMPORAL_HARD_MULT = 1.08
+FINAL_T1_TEMPORAL_EXTREME_SCALE = 0.00
+FINAL_T1_TEMPORAL_RECAP_EXCESS_SCALE = 0.08
+FINAL_T1_TEMPORAL_RECAP_HARD_MULT = 1.06
+FINAL_T1_TEMPORAL_RECAP_EXTREME_SCALE = 0.00
+FINAL_T1_DIRECTION_GUARD_ENABLED = True
+FINAL_T1_DIRECTION_VOTE_THRESHOLD = 0.35
+FINAL_T1_DIRECTION_MOMENTUM_BARS = 3
+FINAL_T1_DIRECTION_MOMENTUM_MIN_MOVE = 0.05
+FINAL_T1_DIRECTION_MAX_ABS_DELTA_TO_OVERRIDE = 0.35
+FINAL_T1_DIRECTION_MIN_OVERRIDE_MOVE = 0.10
+FINAL_T1_DIRECTION_MAX_OVERRIDE_MOVE = 0.25
+FINAL_T1_SHIFT_FADE_POWER = 2.0
 
 TARGET_COLUMNS = ["rOpen", "rHigh", "rLow", "rClose"]
 CORE_FEATURE_COLUMNS = [
@@ -281,6 +300,25 @@ print(
         "final_candle_range_guard_q97_mult": FINAL_CANDLE_RANGE_GUARD_Q97_MULT,
         "final_candle_range_guard_min_wick": FINAL_CANDLE_RANGE_GUARD_MIN_WICK,
         "final_aggregate_guard_lookback": FINAL_AGGREGATE_GUARD_LOOKBACK,
+        "final_t1_temporal_guard_enabled": FINAL_T1_TEMPORAL_GUARD_ENABLED,
+        "final_t1_temporal_guard_lookback": FINAL_T1_TEMPORAL_GUARD_LOOKBACK,
+        "final_t1_temporal_q95_mult": FINAL_T1_TEMPORAL_Q95_MULT,
+        "final_t1_temporal_atr_mult": FINAL_T1_TEMPORAL_ATR_MULT,
+        "final_t1_temporal_min_move": FINAL_T1_TEMPORAL_MIN_MOVE,
+        "final_t1_temporal_excess_scale": FINAL_T1_TEMPORAL_EXCESS_SCALE,
+        "final_t1_temporal_hard_mult": FINAL_T1_TEMPORAL_HARD_MULT,
+        "final_t1_temporal_extreme_scale": FINAL_T1_TEMPORAL_EXTREME_SCALE,
+        "final_t1_temporal_recap_excess_scale": FINAL_T1_TEMPORAL_RECAP_EXCESS_SCALE,
+        "final_t1_temporal_recap_hard_mult": FINAL_T1_TEMPORAL_RECAP_HARD_MULT,
+        "final_t1_temporal_recap_extreme_scale": FINAL_T1_TEMPORAL_RECAP_EXTREME_SCALE,
+        "final_t1_direction_guard_enabled": FINAL_T1_DIRECTION_GUARD_ENABLED,
+        "final_t1_direction_vote_threshold": FINAL_T1_DIRECTION_VOTE_THRESHOLD,
+        "final_t1_direction_momentum_bars": FINAL_T1_DIRECTION_MOMENTUM_BARS,
+        "final_t1_direction_momentum_min_move": FINAL_T1_DIRECTION_MOMENTUM_MIN_MOVE,
+        "final_t1_direction_max_abs_delta_to_override": FINAL_T1_DIRECTION_MAX_ABS_DELTA_TO_OVERRIDE,
+        "final_t1_direction_min_override_move": FINAL_T1_DIRECTION_MIN_OVERRIDE_MOVE,
+        "final_t1_direction_max_override_move": FINAL_T1_DIRECTION_MAX_OVERRIDE_MOVE,
+        "final_t1_shift_fade_power": FINAL_T1_SHIFT_FADE_POWER,
     }
 )
 '@
@@ -618,6 +656,132 @@ def cap_candle_ranges(path: np.ndarray, history_slice: pd.DataFrame) -> np.ndarr
         guarded[idx] = candle
 
     return enforce_candle_validity(guarded.astype(np.float32))
+
+
+def compute_t1_temporal_cap(history_slice: pd.DataFrame) -> float:
+    if history_slice.empty:
+        return float(FINAL_T1_TEMPORAL_MIN_MOVE)
+
+    if "prev_close" in history_slice.columns:
+        prev_close = history_slice["prev_close"].astype(float).copy()
+    else:
+        prev_close = history_slice["close"].shift(1).astype(float)
+        if len(prev_close) > 0:
+            fallback = float(history_slice["open"].iloc[0]) if "open" in history_slice.columns else float(history_slice["close"].iloc[0])
+            prev_close.iloc[0] = fallback
+
+    abs_close_move = (history_slice["close"].astype(float) - prev_close).abs()
+    abs_close_move = abs_close_move.replace([np.inf, -np.inf], np.nan).dropna()
+    q95_move = float(abs_close_move.quantile(0.95)) if len(abs_close_move) > 0 else 0.0
+    atr_value = _latest_atr_value(history_slice)
+
+    return float(
+        max(
+            FINAL_T1_TEMPORAL_MIN_MOVE,
+            FINAL_T1_TEMPORAL_Q95_MULT * q95_move,
+            FINAL_T1_TEMPORAL_ATR_MULT * atr_value,
+        )
+    )
+
+
+def recent_momentum_sign(history_slice: pd.DataFrame, bars: int, min_move: float) -> float:
+    if history_slice.empty or "close" not in history_slice.columns:
+        return 0.0
+    closes = pd.Series(history_slice["close"], dtype="float64").replace([np.inf, -np.inf], np.nan).dropna()
+    if len(closes) <= int(bars):
+        return 0.0
+    delta = float(closes.iloc[-1] - closes.iloc[-1 - int(bars)])
+    if abs(delta) < float(min_move):
+        return 0.0
+    return 1.0 if delta > 0.0 else -1.0
+
+
+def direction_vote_from_expert_paths(expert_paths: Dict[str, np.ndarray], anchor_prev_close: float, weight_map: Dict[str, float]) -> float:
+    vote_score = 0.0
+    anchor_prev_close = float(anchor_prev_close)
+    for expert_name, expert_path in expert_paths.items():
+        weight = float(weight_map.get(expert_name, 0.0))
+        if weight <= 0.0:
+            continue
+        delta = float(np.asarray(expert_path, dtype=np.float32)[0, 3] - anchor_prev_close)
+        vote_score += weight * float(np.sign(delta))
+    return float(vote_score)
+
+
+def shift_path_from_first_close(path: np.ndarray, target_first_close: float, fade_power: float = 2.0) -> np.ndarray:
+    shifted = np.asarray(path, dtype=np.float32).copy()
+    if len(shifted) == 0:
+        return shifted
+    close_shift = float(target_first_close) - float(shifted[0, 3])
+    if abs(close_shift) <= 1e-12:
+        return enforce_candle_validity(shifted.astype(np.float32))
+    fade = np.linspace(1.0, 0.0, len(shifted), dtype=np.float32) ** float(fade_power)
+    shifted = shifted + close_shift * fade[:, None]
+    return enforce_candle_validity(shifted.astype(np.float32))
+
+
+def apply_t1_temporal_direction_guard(
+    path: np.ndarray,
+    anchor_prev_close: float,
+    history_slice: pd.DataFrame,
+    expert_paths: Dict[str, np.ndarray],
+    weight_map: Dict[str, float],
+    previous_next_close: Optional[float] = None,
+) -> Tuple[np.ndarray, Optional[float], float, float]:
+    guarded = np.asarray(path, dtype=np.float32).copy()
+    target_first_close = float(guarded[0, 3])
+    temporal_cap: Optional[float] = None
+    direction_vote = 0.0
+    momentum_sign = 0.0
+
+    if FINAL_T1_TEMPORAL_GUARD_ENABLED:
+        temporal_cap = compute_t1_temporal_cap(history_slice)
+        if previous_next_close is not None:
+            delta_from_prev = float(target_first_close) - float(previous_next_close)
+            compressed = _compress_abs_move(
+                abs(delta_from_prev),
+                temporal_cap,
+                FINAL_T1_TEMPORAL_EXCESS_SCALE,
+                FINAL_T1_TEMPORAL_HARD_MULT,
+                FINAL_T1_TEMPORAL_EXTREME_SCALE,
+            )
+            target_first_close = float(previous_next_close) + math.copysign(compressed, delta_from_prev)
+
+    if FINAL_T1_DIRECTION_GUARD_ENABLED:
+        direction_vote = direction_vote_from_expert_paths(expert_paths, anchor_prev_close, weight_map)
+        vote_sign = float(np.sign(direction_vote))
+        current_delta = float(target_first_close) - float(anchor_prev_close)
+        momentum_sign = recent_momentum_sign(
+            history_slice,
+            FINAL_T1_DIRECTION_MOMENTUM_BARS,
+            FINAL_T1_DIRECTION_MOMENTUM_MIN_MOVE,
+        )
+        if (
+            abs(direction_vote) >= float(FINAL_T1_DIRECTION_VOTE_THRESHOLD)
+            and vote_sign != 0.0
+            and np.sign(current_delta) != vote_sign
+            and abs(current_delta) <= float(FINAL_T1_DIRECTION_MAX_ABS_DELTA_TO_OVERRIDE)
+            and momentum_sign == vote_sign
+        ):
+            override_abs = min(
+                max(abs(current_delta) * 0.5, float(FINAL_T1_DIRECTION_MIN_OVERRIDE_MOVE)),
+                float(FINAL_T1_DIRECTION_MAX_OVERRIDE_MOVE),
+            )
+            target_first_close = float(anchor_prev_close) + vote_sign * float(override_abs)
+
+    if FINAL_T1_TEMPORAL_GUARD_ENABLED and previous_next_close is not None and temporal_cap is not None:
+        delta_from_prev = float(target_first_close) - float(previous_next_close)
+        compressed = _compress_abs_move(
+            abs(delta_from_prev),
+            temporal_cap,
+            FINAL_T1_TEMPORAL_RECAP_EXCESS_SCALE,
+            FINAL_T1_TEMPORAL_RECAP_HARD_MULT,
+            FINAL_T1_TEMPORAL_RECAP_EXTREME_SCALE,
+        )
+        target_first_close = float(previous_next_close) + math.copysign(compressed, delta_from_prev)
+
+    guarded = shift_path_from_first_close(guarded, target_first_close, fade_power=float(FINAL_T1_SHIFT_FADE_POWER))
+    return guarded, temporal_cap, float(direction_vote), float(momentum_sign)
 
 
 def postprocess_aggregate_path(path: np.ndarray, anchor_prev_close: float, history_slice: pd.DataFrame) -> Tuple[np.ndarray, Optional[float]]:
@@ -1455,12 +1619,16 @@ def stance_from_action(action: float) -> str:
 
 $cells += New-CodeCell @'
 EXPERT_PREDICTIONS: Dict[str, Dict[str, Any]] = {}
+PREVIOUS_EXPERT_PREDICTIONS: Dict[str, Dict[str, Any]] = {}
 expert_summary_rows: List[Dict[str, Any]] = []
 
 for expert_name in EXPECTED_EXPERTS:
     bundle = load_expert_bundle(expert_name)
     feature_df = FEATURE_FRAMES[bundle.feature_mode]
     model_input = build_latest_input(feature_df, bundle)
+    previous_model_input = None
+    if len(feature_df) >= bundle.lookback + 2:
+        previous_model_input = build_anchor_input(feature_df, bundle, len(feature_df) - 2)
 
     regime_name = "NORMAL"
     regime_indicator = 0.0
@@ -1469,9 +1637,19 @@ for expert_name in EXPECTED_EXPERTS:
         recent_history = feature_df.iloc[max(0, len(feature_df) - 390) :].copy()
         regime_name, regime_multiplier, regime_indicator = detect_regime_multiplier(recent_history)
 
+    previous_regime_indicator = regime_indicator
+    previous_regime_multiplier = regime_multiplier
+    if bundle.feature_mode == "regime" and previous_model_input is not None:
+        previous_history = feature_df.iloc[max(0, len(feature_df) - 1 - 390) : len(feature_df) - 1].copy()
+        _, previous_regime_multiplier, previous_regime_indicator = detect_regime_multiplier(previous_history)
+
     base_temperature = float(bundle.inference_config["sampling_temperature"])
     time_temperature = intraday_temperature(model_input["anchor_timestamp"])
     effective_temperature = base_temperature * (time_temperature / 1.5)
+    previous_effective_temperature = None
+    if previous_model_input is not None:
+        previous_time_temperature = intraday_temperature(previous_model_input["anchor_timestamp"])
+        previous_effective_temperature = base_temperature * (previous_time_temperature / 1.5)
 
     predicted_path = generate_ensemble_with_trend_selection(
         bundle=bundle,
@@ -1479,6 +1657,14 @@ for expert_name in EXPECTED_EXPERTS:
         temperature=effective_temperature,
         regime_multiplier=regime_multiplier,
     )
+    previous_predicted_path = None
+    if previous_model_input is not None and previous_effective_temperature is not None:
+        previous_predicted_path = generate_ensemble_with_trend_selection(
+            bundle=bundle,
+            model_input=previous_model_input,
+            temperature=previous_effective_temperature,
+            regime_multiplier=previous_regime_multiplier,
+        )
 
     EXPERT_PREDICTIONS[expert_name] = {
         "version": bundle.version,
@@ -1493,6 +1679,15 @@ for expert_name in EXPECTED_EXPERTS:
         "regime_indicator": regime_indicator,
         "effective_temperature": effective_temperature * regime_multiplier,
     }
+    if previous_model_input is not None and previous_predicted_path is not None and previous_effective_temperature is not None:
+        PREVIOUS_EXPERT_PREDICTIONS[expert_name] = {
+            "version": bundle.version,
+            "anchor_timestamp": previous_model_input["anchor_timestamp"],
+            "anchor_prev_close": previous_model_input["anchor_prev_close"],
+            "path": previous_predicted_path,
+            "regime_indicator": previous_regime_indicator,
+            "effective_temperature": previous_effective_temperature * previous_regime_multiplier,
+        }
 
     expert_summary_rows.append(
         {
@@ -1535,6 +1730,29 @@ aggregate_path, aggregate_soft_swing_cap = postprocess_aggregate_path(
     aggregate_anchor_prev_close,
     aggregate_guard_history,
 )
+previous_aggregate_next_close: Optional[float] = None
+if len(PREVIOUS_EXPERT_PREDICTIONS) == len(EXPECTED_EXPERTS):
+    previous_aggregate_path_raw = np.zeros((HORIZON, 4), dtype=np.float32)
+    previous_aggregate_anchor_prev_close = float(list(PREVIOUS_EXPERT_PREDICTIONS.values())[0]["anchor_prev_close"])
+    previous_anchor_index = aggregate_anchor_index - 1
+    for expert_name in EXPECTED_EXPERTS:
+        weight = float(ensemble_weights[expert_name])
+        previous_aggregate_path_raw += weight * PREVIOUS_EXPERT_PREDICTIONS[expert_name]["path"]
+    previous_guard_history = build_guard_history_slice(FEATURE_FRAMES["technical"], previous_anchor_index, FINAL_AGGREGATE_GUARD_LOOKBACK)
+    previous_aggregate_path, _ = postprocess_aggregate_path(
+        previous_aggregate_path_raw,
+        previous_aggregate_anchor_prev_close,
+        previous_guard_history,
+    )
+    previous_aggregate_next_close = float(previous_aggregate_path[0, 3])
+aggregate_path, aggregate_t1_temporal_cap, aggregate_t1_direction_vote, aggregate_t1_momentum_sign = apply_t1_temporal_direction_guard(
+    aggregate_path,
+    aggregate_anchor_prev_close,
+    aggregate_guard_history,
+    {expert_name: EXPERT_PREDICTIONS[expert_name]["path"] for expert_name in EXPECTED_EXPERTS},
+    ensemble_weights,
+    previous_next_close=previous_aggregate_next_close,
+)
 aggregate_regime_name = regime_name_from_indicator(aggregate_regime_indicator)
 
 close_path_df = pd.DataFrame({"step": np.arange(1, HORIZON + 1)})
@@ -1558,6 +1776,10 @@ aggregate_summary_df = pd.DataFrame(
             "aggregate_soft_swing_cap": float(aggregate_soft_swing_cap) if aggregate_soft_swing_cap is not None else np.nan,
             "aggregate_empirical_envelope_enabled": bool(FINAL_EMPIRICAL_ENVELOPE_ENABLED),
             "aggregate_candle_range_guard_enabled": bool(FINAL_CANDLE_RANGE_GUARD_ENABLED),
+            "aggregate_t1_temporal_cap": float(aggregate_t1_temporal_cap) if aggregate_t1_temporal_cap is not None else np.nan,
+            "aggregate_t1_direction_vote": float(aggregate_t1_direction_vote),
+            "aggregate_t1_momentum_sign": float(aggregate_t1_momentum_sign),
+            "aggregate_previous_next_close_ref": float(previous_aggregate_next_close) if previous_aggregate_next_close is not None else np.nan,
         }
     ]
 )
@@ -1690,6 +1912,9 @@ class FinalRollingLog:
     expert_paths: Dict[str, np.ndarray]
     aggregate_regime_indicator: float
     aggregate_soft_swing_cap: Optional[float]
+    aggregate_t1_temporal_cap: Optional[float]
+    aggregate_t1_direction_vote: float
+    aggregate_t1_momentum_sign: float
     temperatures: Dict[str, float]
 
 
@@ -1830,6 +2055,7 @@ def build_final_rolling_logs(
     expert_outputs: Dict[str, Dict[str, Any]],
 ) -> List[FinalRollingLog]:
     logs: List[FinalRollingLog] = []
+    previous_aggregate_next_close: Optional[float] = None
     for offset, anchor_index in enumerate(anchor_indices):
         aggregate_raw = np.zeros((HORIZON, 4), dtype=np.float32)
         aggregate_regime_indicator = 0.0
@@ -1847,6 +2073,15 @@ def build_final_rolling_logs(
             float(actual_payload["prev_close"][offset]),
             aggregate_guard_history,
         )
+        aggregate_path, aggregate_t1_temporal_cap, aggregate_t1_direction_vote, aggregate_t1_momentum_sign = apply_t1_temporal_direction_guard(
+            aggregate_path,
+            float(actual_payload["prev_close"][offset]),
+            aggregate_guard_history,
+            expert_paths,
+            ensemble_weights,
+            previous_next_close=previous_aggregate_next_close,
+        )
+        previous_aggregate_next_close = float(aggregate_path[0, 3])
 
         logs.append(
             FinalRollingLog(
@@ -1859,6 +2094,9 @@ def build_final_rolling_logs(
                 expert_paths=expert_paths,
                 aggregate_regime_indicator=float(aggregate_regime_indicator),
                 aggregate_soft_swing_cap=aggregate_soft_swing_cap,
+                aggregate_t1_temporal_cap=aggregate_t1_temporal_cap,
+                aggregate_t1_direction_vote=float(aggregate_t1_direction_vote),
+                aggregate_t1_momentum_sign=float(aggregate_t1_momentum_sign),
                 temperatures=temperatures,
             )
         )
@@ -1879,6 +2117,9 @@ def summarize_final_rolling_logs(logs: List[FinalRollingLog]) -> Tuple[pd.DataFr
             "aggregate_regime_indicator": float(log.aggregate_regime_indicator),
             "aggregate_regime_name": regime_name_from_indicator(log.aggregate_regime_indicator),
             "aggregate_soft_swing_cap": float(log.aggregate_soft_swing_cap) if log.aggregate_soft_swing_cap is not None else np.nan,
+            "aggregate_t1_temporal_cap": float(log.aggregate_t1_temporal_cap) if log.aggregate_t1_temporal_cap is not None else np.nan,
+            "aggregate_t1_direction_vote": float(log.aggregate_t1_direction_vote),
+            "aggregate_t1_momentum_sign": float(log.aggregate_t1_momentum_sign),
             "direction_hit": float(direction_hit),
             "path_mae": float(np.mean(np.abs(pred_close - actual_close))),
         }
@@ -2208,6 +2449,33 @@ if SAVE_RUN_OUTPUTS:
                 "q97_mult": FINAL_CANDLE_RANGE_GUARD_Q97_MULT,
                 "min_wick": FINAL_CANDLE_RANGE_GUARD_MIN_WICK,
             },
+            "t1_temporal_guard": {
+                "enabled": FINAL_T1_TEMPORAL_GUARD_ENABLED,
+                "lookback": FINAL_T1_TEMPORAL_GUARD_LOOKBACK,
+                "q95_mult": FINAL_T1_TEMPORAL_Q95_MULT,
+                "atr_mult": FINAL_T1_TEMPORAL_ATR_MULT,
+                "min_move": FINAL_T1_TEMPORAL_MIN_MOVE,
+                "excess_scale": FINAL_T1_TEMPORAL_EXCESS_SCALE,
+                "hard_mult": FINAL_T1_TEMPORAL_HARD_MULT,
+                "extreme_scale": FINAL_T1_TEMPORAL_EXTREME_SCALE,
+                "recap_excess_scale": FINAL_T1_TEMPORAL_RECAP_EXCESS_SCALE,
+                "recap_hard_mult": FINAL_T1_TEMPORAL_RECAP_HARD_MULT,
+                "recap_extreme_scale": FINAL_T1_TEMPORAL_RECAP_EXTREME_SCALE,
+                "latest_cap": aggregate_t1_temporal_cap,
+                "previous_next_close_ref": previous_aggregate_next_close,
+            },
+            "t1_direction_guard": {
+                "enabled": FINAL_T1_DIRECTION_GUARD_ENABLED,
+                "vote_threshold": FINAL_T1_DIRECTION_VOTE_THRESHOLD,
+                "momentum_bars": FINAL_T1_DIRECTION_MOMENTUM_BARS,
+                "momentum_min_move": FINAL_T1_DIRECTION_MOMENTUM_MIN_MOVE,
+                "max_abs_delta_to_override": FINAL_T1_DIRECTION_MAX_ABS_DELTA_TO_OVERRIDE,
+                "min_override_move": FINAL_T1_DIRECTION_MIN_OVERRIDE_MOVE,
+                "max_override_move": FINAL_T1_DIRECTION_MAX_OVERRIDE_MOVE,
+                "shift_fade_power": FINAL_T1_SHIFT_FADE_POWER,
+                "latest_vote": aggregate_t1_direction_vote,
+                "latest_momentum_sign": aggregate_t1_momentum_sign,
+            },
         },
     )
     save_npz(
@@ -2269,6 +2537,33 @@ if SAVE_RUN_OUTPUTS:
                 "lookback": FINAL_CANDLE_RANGE_GUARD_LOOKBACK,
                 "q97_mult": FINAL_CANDLE_RANGE_GUARD_Q97_MULT,
                 "min_wick": FINAL_CANDLE_RANGE_GUARD_MIN_WICK,
+            },
+            "t1_temporal_guard": {
+                "enabled": FINAL_T1_TEMPORAL_GUARD_ENABLED,
+                "lookback": FINAL_T1_TEMPORAL_GUARD_LOOKBACK,
+                "q95_mult": FINAL_T1_TEMPORAL_Q95_MULT,
+                "atr_mult": FINAL_T1_TEMPORAL_ATR_MULT,
+                "min_move": FINAL_T1_TEMPORAL_MIN_MOVE,
+                "excess_scale": FINAL_T1_TEMPORAL_EXCESS_SCALE,
+                "hard_mult": FINAL_T1_TEMPORAL_HARD_MULT,
+                "extreme_scale": FINAL_T1_TEMPORAL_EXTREME_SCALE,
+                "recap_excess_scale": FINAL_T1_TEMPORAL_RECAP_EXCESS_SCALE,
+                "recap_hard_mult": FINAL_T1_TEMPORAL_RECAP_HARD_MULT,
+                "recap_extreme_scale": FINAL_T1_TEMPORAL_RECAP_EXTREME_SCALE,
+                "latest_cap": aggregate_t1_temporal_cap,
+                "previous_next_close_ref": previous_aggregate_next_close,
+            },
+            "t1_direction_guard": {
+                "enabled": FINAL_T1_DIRECTION_GUARD_ENABLED,
+                "vote_threshold": FINAL_T1_DIRECTION_VOTE_THRESHOLD,
+                "momentum_bars": FINAL_T1_DIRECTION_MOMENTUM_BARS,
+                "momentum_min_move": FINAL_T1_DIRECTION_MOMENTUM_MIN_MOVE,
+                "max_abs_delta_to_override": FINAL_T1_DIRECTION_MAX_ABS_DELTA_TO_OVERRIDE,
+                "min_override_move": FINAL_T1_DIRECTION_MIN_OVERRIDE_MOVE,
+                "max_override_move": FINAL_T1_DIRECTION_MAX_OVERRIDE_MOVE,
+                "shift_fade_power": FINAL_T1_SHIFT_FADE_POWER,
+                "latest_vote": aggregate_t1_direction_vote,
+                "latest_momentum_sign": aggregate_t1_momentum_sign,
             },
             "rolling_backtest_date": FINAL_ROLLING_BACKTEST_DATE,
             "rolling_prediction_count": len(FINAL_ROLLING_LOGS),
