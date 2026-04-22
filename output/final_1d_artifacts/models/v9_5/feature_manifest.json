@@ -1,0 +1,22 @@
+{
+  "feature_mode": "core",
+  "feature_columns": [
+    "rOpen",
+    "rHigh",
+    "rLow",
+    "rClose",
+    "logVolChange",
+    "logTradeCountChange",
+    "vwapDelta",
+    "rangeFrac",
+    "orderFlowProxy",
+    "tickPressure"
+  ],
+  "input_channels_with_impute": 11,
+  "target_columns": [
+    "rOpen",
+    "rHigh",
+    "rLow",
+    "rClose"
+  ]
+}

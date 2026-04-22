@@ -1237,6 +1237,30 @@ display(session_df.tail())
 """
 
 
+INFER_CELL15 = """## Daily Rolling Backtest
+
+This section replays a strictly causal rolling daily window using the frozen expert artifacts. For each anchor day, every expert predicts from its own feature block, the saved ensemble weights form the aggregate OHLC path, and the individual expert paths are shown as close-line overlays.
+"""
+
+
+INFER_CELL16 = """FINAL_ROLLING_FRAME_OUTPUT_DIR = FINAL_RUN_DIR / "rolling_frames"
+MAX_ROLLING_LOOKBACK = max(int(MODEL_ARTIFACTS[expert_name]["lookback"]) for expert_name in EXPECTED_EXPERTS)
+
+print(
+    {
+        "final_rolling_window": FINAL_ROLLING_WINDOW,
+        "final_rolling_step": FINAL_ROLLING_STEP,
+        "final_rolling_backtest_date": FINAL_ROLLING_BACKTEST_DATE,
+        "final_rolling_history_bars": FINAL_ROLLING_HISTORY_BARS,
+        "final_rolling_save_frames": FINAL_ROLLING_SAVE_FRAMES,
+        "final_rolling_device": str(FINAL_ROLLING_DEVICE),
+        "final_rolling_clear_every": FINAL_ROLLING_CLEAR_EVERY,
+        "max_rolling_lookback": MAX_ROLLING_LOOKBACK,
+    }
+)
+"""
+
+
 INFER_CELL17 = """@dataclass
 class FinalRollingLog:
     anchor_index: int
@@ -1736,6 +1760,10 @@ def build_final1d_train() -> dict:
     set_source(nb, 7, cell7)
 
     nb["metadata"]["title"] = "Final1DTrain.ipynb"
+    for cell in nb["cells"]:
+        if cell.get("cell_type") == "code":
+            cell["outputs"] = []
+            cell["execution_count"] = None
     return nb
 
 
@@ -1746,6 +1774,8 @@ def build_final1d_infer() -> dict:
     set_source(nb, 5, INFER_CELL5)
     set_source(nb, 6, INFER_CELL6)
     set_source(nb, 7, INFER_CELL7)
+    set_source(nb, 15, INFER_CELL15)
+    set_source(nb, 16, INFER_CELL16)
     set_source(nb, 17, INFER_CELL17)
     set_source(nb, 18, INFER_CELL18)
 
@@ -1783,6 +1813,10 @@ def build_final1d_infer() -> dict:
     set_source(nb, 19, cell19)
 
     nb["metadata"]["title"] = "FINAL1D.ipynb"
+    for cell in nb["cells"]:
+        if cell.get("cell_type") == "code":
+            cell["outputs"] = []
+            cell["execution_count"] = None
     return nb
 
 

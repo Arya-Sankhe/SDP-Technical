@@ -1,0 +1,87 @@
+{
+  "summary": {
+    "raw_action": 0.9700862765312195,
+    "policy_std": 0.9951227903366089,
+    "confidence_score": 0.5012222830812755,
+    "critic_value_estimate": -0.2354908436536789,
+    "aggregate_regime_name": "NORMAL",
+    "regime_scale": 1.0,
+    "recommended_position_pct": 0.9700862765312195,
+    "stance": "LONG"
+  },
+  "portfolio_state": {
+    "cash_norm": 1.0,
+    "shares_norm": 0.0,
+    "portfolio_value_norm": 1.0,
+    "position_pct": 0.0
+  },
+  "run_label": "20260422_214849",
+  "symbol": "MSFT",
+  "excluded_experts": [],
+  "saved_weights": {
+    "v9_5": 0.7279129608544146,
+    "v8_5": 0.16368469645114983,
+    "v9_2": 0.10840234269443556
+  },
+  "final_weights": {
+    "v8_5": 0.16368469645114983,
+    "v9_2": 0.10840234269443556,
+    "v9_5": 0.7279129608544146
+  },
+  "aggregate_shrink": 0.85,
+  "soft_swing_guard": {
+    "enabled": true,
+    "lookback": 252,
+    "q95_mult": 1.35,
+    "atr_mult": 0.75,
+    "min_move": 0.5,
+    "excess_scale": 0.2,
+    "hard_mult": 1.15,
+    "extreme_scale": 0.02,
+    "latest_cap": 17.088974999999994
+  },
+  "empirical_envelope": {
+    "enabled": true,
+    "lookback": 252,
+    "q95_mult": 1.2,
+    "step_base_mult": 1.0,
+    "atr_mult": 0.75,
+    "min_move": 0.5,
+    "excess_scale": 0.16,
+    "hard_mult": 1.12,
+    "extreme_scale": 0.02
+  },
+  "candle_range_guard": {
+    "enabled": true,
+    "lookback": 252,
+    "q97_mult": 1.5,
+    "min_wick": 0.6
+  },
+  "t1_temporal_guard": {
+    "enabled": true,
+    "lookback": 252,
+    "q95_mult": 1.2,
+    "atr_mult": 0.6,
+    "min_move": 0.5,
+    "excess_scale": 0.14,
+    "hard_mult": 1.12,
+    "extreme_scale": 0.0,
+    "recap_excess_scale": 0.1,
+    "recap_hard_mult": 1.08,
+    "recap_extreme_scale": 0.0,
+    "latest_cap": 15.190199999999994,
+    "previous_next_close_ref": 418.17767333984375
+  },
+  "t1_direction_guard": {
+    "enabled": true,
+    "vote_threshold": 0.35,
+    "momentum_bars": 3,
+    "momentum_min_move": 0.15,
+    "max_abs_delta_to_override": 0.8,
+    "min_override_move": 0.15,
+    "max_override_move": 0.6,
+    "shift_fade_power": 2.0,
+    "latest_vote": -0.7831953146111289,
+    "latest_momentum_sign": 1.0
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "walkforward_summary": {
+    "step_1_close_mae": 61.607245445251465,
+    "baseline_step_1_close_mae": 4.305989027023315,
+    "horizon_close_mae": 59.72002410888672,
+    "baseline_horizon_close_mae": 12.85131549835205,
+    "path_close_mae": 56.629841327667236,
+    "baseline_path_close_mae": 9.151870727539062,
+    "directional_accuracy": 0.49739583333333337,
+    "baseline_directional_accuracy": 0.0026041666666666665,
+    "slice_count": 2,
+    "val_windows_used": 384
+  },
+  "rolling_summary": {
+    "rolling_predictions": 60,
+    "directional_hit_rate": 0.5166666666666667,
+    "step_1_close_mae": 8.280538940429688,
+    "step_3_close_mae": 15.935802205403645,
+    "step_5_close_mae": 18.802950541178387,
+    "step_7_close_mae": 23.01057637532552
+  },
+  "backtest_date": "2026-01-16"
+}
