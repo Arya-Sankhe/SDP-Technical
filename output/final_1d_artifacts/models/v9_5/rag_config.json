@@ -1,6 +1,6 @@
 {
   "embedding_dim": 64,
   "k_retrieve": 5,
-  "blend_weight": 0.25,
+  "blend_weight": 0.0,
   "max_patterns": 1024
 }

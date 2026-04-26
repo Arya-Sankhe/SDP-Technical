@@ -1,23 +1,26 @@
 {
   "walkforward_summary": {
-    "step_1_close_mae": 5.797238111495972,
-    "baseline_step_1_close_mae": 4.256978511810303,
-    "horizon_close_mae": 14.611449241638184,
-    "baseline_horizon_close_mae": 14.177947998046875,
-    "path_close_mae": 10.342575550079346,
-    "baseline_path_close_mae": 9.746795654296875,
-    "directional_accuracy": 0.5104166666666667,
+    "step_1_close_mae": 4.5014564990997314,
+    "baseline_step_1_close_mae": 4.344061851501465,
+    "step_1_ohlc_mae": 3.824161171913147,
+    "baseline_step_1_ohlc_mae": 4.074141144752502,
+    "step_1_range_mae": 2.930280327796936,
+    "baseline_step_1_range_mae": 7.49898624420166,
+    "horizon_close_mae": 4.5014564990997314,
+    "baseline_horizon_close_mae": 4.344061851501465,
+    "path_close_mae": 4.5014564990997314,
+    "baseline_path_close_mae": 4.344061851501465,
+    "directional_accuracy": 0.41145833333333337,
     "baseline_directional_accuracy": 0.005208333333333333,
     "slice_count": 2,
     "val_windows_used": 192
   },
   "rolling_summary": {
     "rolling_predictions": 60,
-    "directional_hit_rate": 0.5166666666666667,
-    "step_1_close_mae": 6.238607788085938,
-    "step_3_close_mae": 12.654899597167969,
-    "step_5_close_mae": 16.987703450520833,
-    "step_7_close_mae": 21.4790522257487
+    "directional_hit_rate": 0.4666666666666667,
+    "step_1_ohlc_mae": 5.1369879404703775,
+    "step_1_range_mae": 3.234716288248698,
+    "step_1_close_mae": 6.536449686686198
   },
-  "backtest_date": "2026-01-16"
+  "backtest_date": "2026-01-29"
 }

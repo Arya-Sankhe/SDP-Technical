@@ -16,5 +16,5 @@
   "dsr_eta": 0.1,
   "run_training": true,
   "device": "cpu",
-  "state_dim": 43
+  "state_dim": 19
 }

@@ -35,17 +35,17 @@
     "scheduler_min_lr": 1e-06,
     "loss_weights": {
       "range": 0.3,
-      "volatility": 0.5,
-      "directional": 0.1
+      "volatility": 0.0,
+      "directional": 0.0
     }
   },
   "runtime": {
-    "created_at_utc": "2026-04-22T21:40:05Z",
+    "created_at_utc": "2026-04-26T18:43:45Z",
     "symbol": "MSFT",
     "device": "cuda",
     "gpu_mem_gb": 8.0,
     "lookback_days": 3650,
-    "horizon": 7,
+    "horizon": 1,
     "timeframe": "1D",
     "rolling_eval_bars": 60
   }
