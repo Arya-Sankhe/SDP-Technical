@@ -1,16 +1,22 @@
 {
   "walkforward_summary": {
-    "step_1_close_mae": 11.24209475517273,
-    "baseline_step_1_close_mae": 4.327057123184204,
-    "step_1_ohlc_mae": 12.75219213962555,
-    "baseline_step_1_ohlc_mae": 4.055758595466614,
-    "step_1_range_mae": 25.49213969707489,
-    "baseline_step_1_range_mae": 7.480898857116699,
-    "horizon_close_mae": 11.24209475517273,
-    "baseline_horizon_close_mae": 4.327057123184204,
-    "path_close_mae": 11.24209475517273,
-    "baseline_path_close_mae": 4.327057123184204,
-    "directional_accuracy": 0.49479166666666663,
+    "step_1_close_mae": 4.601532459259033,
+    "baseline_step_1_close_mae": 4.329074859619141,
+    "step_1_ohlc_mae": 4.484837651252747,
+    "baseline_step_1_ohlc_mae": 4.060133576393127,
+    "step_1_range_mae": 3.801824927330017,
+    "baseline_step_1_range_mae": 7.46617317199707,
+    "horizon_close_mae": 14.222517490386963,
+    "baseline_horizon_close_mae": 12.853854656219482,
+    "horizon_ohlc_mae": 13.879128456115723,
+    "baseline_horizon_ohlc_mae": 12.653450012207031,
+    "path_close_mae": 9.83213758468628,
+    "baseline_path_close_mae": 9.175710201263428,
+    "path_ohlc_mae": 9.45054006576538,
+    "baseline_path_ohlc_mae": 8.943629264831543,
+    "path_range_mae": 3.275867462158203,
+    "baseline_path_range_mae": 7.48225474357605,
+    "directional_accuracy": 0.5052083333333334,
     "baseline_directional_accuracy": 0.0026041666666666665,
     "slice_count": 2,
     "val_windows_used": 384
@@ -18,9 +24,12 @@
   "rolling_summary": {
     "rolling_predictions": 60,
     "directional_hit_rate": 0.45,
-    "step_1_ohlc_mae": 5.09639523824056,
-    "step_1_range_mae": 3.119701131184896,
-    "step_1_close_mae": 6.572693379720052
+    "step_1_ohlc_mae": 5.10316899617513,
+    "step_1_range_mae": 2.865470377604167,
+    "step_1_close_mae": 6.849520365397136,
+    "step_3_close_mae": 13.42521464029948,
+    "step_5_close_mae": 19.255643717447917,
+    "step_7_close_mae": 23.30997060139974
   },
-  "backtest_date": "2026-01-29"
+  "backtest_date": "2026-01-21"
 }

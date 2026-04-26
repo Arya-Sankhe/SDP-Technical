@@ -1,26 +1,35 @@
 {
   "walkforward_summary": {
-    "step_1_close_mae": 4.5014564990997314,
-    "baseline_step_1_close_mae": 4.344061851501465,
-    "step_1_ohlc_mae": 3.824161171913147,
-    "baseline_step_1_ohlc_mae": 4.074141144752502,
-    "step_1_range_mae": 2.930280327796936,
-    "baseline_step_1_range_mae": 7.49898624420166,
-    "horizon_close_mae": 4.5014564990997314,
-    "baseline_horizon_close_mae": 4.344061851501465,
-    "path_close_mae": 4.5014564990997314,
-    "baseline_path_close_mae": 4.344061851501465,
-    "directional_accuracy": 0.41145833333333337,
+    "step_1_close_mae": 5.054120779037476,
+    "baseline_step_1_close_mae": 4.323202610015869,
+    "step_1_ohlc_mae": 4.394412159919739,
+    "baseline_step_1_ohlc_mae": 4.068946003913879,
+    "step_1_range_mae": 3.2565304040908813,
+    "baseline_step_1_range_mae": 7.47461199760437,
+    "horizon_close_mae": 19.14503574371338,
+    "baseline_horizon_close_mae": 14.206333637237549,
+    "horizon_ohlc_mae": 18.721160411834717,
+    "baseline_horizon_ohlc_mae": 13.969679355621338,
+    "path_close_mae": 13.819120407104492,
+    "baseline_path_close_mae": 9.770647048950195,
+    "path_ohlc_mae": 12.828396320343018,
+    "baseline_path_ohlc_mae": 9.475822448730469,
+    "path_range_mae": 3.772457242012024,
+    "baseline_path_range_mae": 7.490764617919922,
+    "directional_accuracy": 0.44270833333333337,
     "baseline_directional_accuracy": 0.005208333333333333,
     "slice_count": 2,
     "val_windows_used": 192
   },
   "rolling_summary": {
     "rolling_predictions": 60,
-    "directional_hit_rate": 0.4666666666666667,
-    "step_1_ohlc_mae": 5.1369879404703775,
-    "step_1_range_mae": 3.234716288248698,
-    "step_1_close_mae": 6.536449686686198
+    "directional_hit_rate": 0.55,
+    "step_1_ohlc_mae": 5.53088607788086,
+    "step_1_range_mae": 3.6575586954752604,
+    "step_1_close_mae": 7.625248718261719,
+    "step_3_close_mae": 13.332212829589844,
+    "step_5_close_mae": 17.319168599446616,
+    "step_7_close_mae": 20.567496744791665
   },
-  "backtest_date": "2026-01-29"
+  "backtest_date": "2026-01-21"
 }

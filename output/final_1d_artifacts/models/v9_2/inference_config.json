@@ -1,10 +1,10 @@
 {
-  "lookback": 256,
-  "horizon": 1,
-  "ensemble_size": 20,
+  "lookback": 128,
+  "horizon": 7,
+  "ensemble_size": 1,
   "sampling_temperature": 0.0,
   "trend_lookback_bars": 20,
   "strong_trend_threshold": 0.002,
   "min_predicted_vol": 0.0001,
-  "point_forecast_method": "deterministic_mu_no_trend_selection"
+  "point_forecast_method": "direct_7d_deterministic_mu_no_trend_selection"
 }

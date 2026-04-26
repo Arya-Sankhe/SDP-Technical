@@ -1,26 +1,35 @@
 {
   "walkforward_summary": {
-    "step_1_close_mae": 15.052790641784668,
-    "baseline_step_1_close_mae": 4.327057123184204,
-    "step_1_ohlc_mae": 13.409679412841797,
-    "baseline_step_1_ohlc_mae": 4.055758595466614,
-    "step_1_range_mae": 14.715380668640137,
-    "baseline_step_1_range_mae": 7.480898857116699,
-    "horizon_close_mae": 15.052790641784668,
-    "baseline_horizon_close_mae": 4.327057123184204,
-    "path_close_mae": 15.052790641784668,
-    "baseline_path_close_mae": 4.327057123184204,
-    "directional_accuracy": 0.49479166666666663,
+    "step_1_close_mae": 6.200451850891113,
+    "baseline_step_1_close_mae": 4.329074859619141,
+    "step_1_ohlc_mae": 4.593187093734741,
+    "baseline_step_1_ohlc_mae": 4.060133576393127,
+    "step_1_range_mae": 3.1302530765533447,
+    "baseline_step_1_range_mae": 7.46617317199707,
+    "horizon_close_mae": 14.176531314849854,
+    "baseline_horizon_close_mae": 12.853854656219482,
+    "horizon_ohlc_mae": 14.07201099395752,
+    "baseline_horizon_ohlc_mae": 12.653450012207031,
+    "path_close_mae": 10.171518802642822,
+    "baseline_path_close_mae": 9.175710201263428,
+    "path_ohlc_mae": 9.865644931793213,
+    "baseline_path_ohlc_mae": 8.943629264831543,
+    "path_range_mae": 3.7659337520599365,
+    "baseline_path_range_mae": 7.48225474357605,
+    "directional_accuracy": 0.49739583333333337,
     "baseline_directional_accuracy": 0.0026041666666666665,
     "slice_count": 2,
     "val_windows_used": 384
   },
   "rolling_summary": {
     "rolling_predictions": 60,
-    "directional_hit_rate": 0.43333333333333335,
-    "step_1_ohlc_mae": 5.202949778238932,
-    "step_1_range_mae": 3.3949762980143228,
-    "step_1_close_mae": 6.786761983235677
+    "directional_hit_rate": 0.45,
+    "step_1_ohlc_mae": 5.240774536132813,
+    "step_1_range_mae": 3.7738688151041666,
+    "step_1_close_mae": 6.913444519042969,
+    "step_3_close_mae": 14.177041625976562,
+    "step_5_close_mae": 18.08458709716797,
+    "step_7_close_mae": 21.530538431803386
   },
-  "backtest_date": "2026-01-29"
+  "backtest_date": "2026-01-21"
 }

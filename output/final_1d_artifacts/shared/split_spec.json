@@ -1,6 +1,6 @@
 {
-  "backtest_date": "2026-01-29",
-  "backtest_cutoff_index": 1384,
+  "backtest_date": "2026-01-21",
+  "backtest_cutoff_index": 1378,
   "walkforward_slices": [
     {
       "name": "slice_1",
