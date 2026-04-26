@@ -2,53 +2,53 @@
   "stats": [
     {
       "step": 512,
-      "rollout_reward_mean": -0.029684840813491313,
-      "portfolio_value": 95000.01390299803
+      "rollout_reward_mean": -0.022551798181441395,
+      "portfolio_value": 86796.8949832004
     },
     {
       "step": 1024,
-      "rollout_reward_mean": 0.0009174977390788552,
-      "portfolio_value": 102319.7733100998
+      "rollout_reward_mean": -0.014899136866412243,
+      "portfolio_value": 121423.25446352645
     },
     {
       "step": 1536,
-      "rollout_reward_mean": -0.05684952632788144,
-      "portfolio_value": 102179.18893474876
+      "rollout_reward_mean": -0.003843163316209002,
+      "portfolio_value": 95175.14789911931
     },
     {
       "step": 2048,
-      "rollout_reward_mean": -0.029972390328558432,
-      "portfolio_value": 94090.2938679384
+      "rollout_reward_mean": 0.02151215319708264,
+      "portfolio_value": 99600.67518055336
     },
     {
       "step": 2560,
-      "rollout_reward_mean": 0.02287087652227677,
-      "portfolio_value": 87105.58574587652
+      "rollout_reward_mean": 0.016189140706887734,
+      "portfolio_value": 86829.3807776181
     },
     {
       "step": 3072,
-      "rollout_reward_mean": -0.009282039845178048,
-      "portfolio_value": 99696.30839376725
+      "rollout_reward_mean": -0.018208230211788565,
+      "portfolio_value": 97433.09845107821
     },
     {
       "step": 3584,
-      "rollout_reward_mean": -0.009201270965262638,
-      "portfolio_value": 92183.59925031097
+      "rollout_reward_mean": -0.012174231997452573,
+      "portfolio_value": 103327.05535426832
     },
     {
       "step": 4096,
-      "rollout_reward_mean": 0.023411852280497924,
-      "portfolio_value": 89514.32486133587
+      "rollout_reward_mean": 0.03718762670115459,
+      "portfolio_value": 83354.87518559535
     },
     {
       "step": 4608,
-      "rollout_reward_mean": 0.07970600702272221,
-      "portfolio_value": 95215.78615150329
+      "rollout_reward_mean": 0.04261744934616914,
+      "portfolio_value": 92421.20657840456
     },
     {
       "step": 5000,
-      "rollout_reward_mean": -0.003887452093286596,
-      "portfolio_value": 89299.04727890994
+      "rollout_reward_mean": 0.060454920382272646,
+      "portfolio_value": 90304.63325991301
     }
   ]
 }

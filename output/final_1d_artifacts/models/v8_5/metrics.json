@@ -24,6 +24,9 @@
   "rolling_summary": {
     "rolling_predictions": 60,
     "directional_hit_rate": 0.45,
+    "path_close_mae": 16.051171906789143,
+    "path_ohlc_mae": 14.829005487759908,
+    "path_range_mae": 3.276124991973241,
     "step_1_ohlc_mae": 5.10316899617513,
     "step_1_range_mae": 2.865470377604167,
     "step_1_close_mae": 6.849520365397136,
