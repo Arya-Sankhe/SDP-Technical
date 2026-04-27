@@ -3,11 +3,12 @@
   "horizon": 7,
   "ensemble_size": 1,
   "target_transform": "vol_scaled_log_returns_v1",
+  "model_revision": "recurrent_decoder_price_path_v2",
   "target_scale_floor": 0.003,
   "target_scale_ceiling": 0.08,
-  "sampling_temperature": 0.0,
+  "sampling_temperature": 0.35,
   "trend_lookback_bars": 20,
   "strong_trend_threshold": 0.002,
   "min_predicted_vol": 0.0001,
-  "point_forecast_method": "vol_scaled_direct_7d_deterministic_mu_no_trend_selection"
+  "point_forecast_method": "vol_scaled_recurrent_decoder_7d_sigma_sample_rag_blend"
 }

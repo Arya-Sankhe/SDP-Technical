@@ -24,7 +24,7 @@
     "dropout": 0.1,
     "learning_rate": 0.0005,
     "weight_decay": 1e-05,
-    "teacher_forcing_decay": 1.0,
+    "teacher_forcing_decay": 0.96,
     "gradient_clip_norm": 1.0,
     "final_max_epochs": 60,
     "final_patience": 12,
@@ -38,12 +38,14 @@
       "nll": 0.22,
       "range": 0.2,
       "volatility": 0.12,
-      "directional": 0.05
+      "directional": 0.05,
+      "price_path": 0.15
     },
     "huber_beta": 0.5
   },
+  "model_revision": "recurrent_decoder_price_path_v2",
   "runtime": {
-    "created_at_utc": "2026-04-27T07:16:37Z",
+    "created_at_utc": "2026-04-27T08:56:01Z",
     "symbol": "MSFT",
     "device": "cuda",
     "gpu_mem_gb": 8.0,

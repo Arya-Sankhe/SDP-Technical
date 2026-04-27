@@ -1,0 +1,2 @@
+# Generated rolling frame images are kept locally but not committed.
+output/final_1d_runs/**/rolling_frames/
