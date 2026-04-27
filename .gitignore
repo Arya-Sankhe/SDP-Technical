@@ -1,2 +1,5 @@
-# Generated rolling frame images are kept locally but not committed.
+# Final run rolling visuals (keep locally; do not commit)
 output/final_1d_runs/**/rolling_frames/
+output/final_1d_runs/**/rolling_backtest_preview.png
+output/final_runs/**/rolling_frames/
+output/final_runs/**/rolling_backtest_preview.png
