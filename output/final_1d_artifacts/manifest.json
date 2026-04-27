@@ -1,13 +1,16 @@
 {
   "runtime": {
-    "created_at_utc": "2026-04-26T19:34:37Z",
+    "created_at_utc": "2026-04-27T07:17:10Z",
     "symbol": "MSFT",
     "device": "cuda",
     "gpu_mem_gb": 8.0,
     "lookback_days": 3650,
     "horizon": 7,
     "timeframe": "1D",
-    "rolling_eval_bars": 60
+    "rolling_eval_bars": 60,
+    "target_scale_floor": 0.003,
+    "target_scale_ceiling": 0.08,
+    "target_transform": "vol_scaled_log_returns_v1"
   },
   "shared": {
     "raw_snapshot": "output\\final_1d_artifacts\\shared\\raw_daily_snapshot.parquet",

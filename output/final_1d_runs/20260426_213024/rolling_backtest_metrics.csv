@@ -1,0 +1,13 @@
+metric,value
+prediction_count,60.0
+directional_hit_rate_t1,0.45
+aggregate_path_mae,15.444231841961543
+aggregate_path_ohlc_mae,14.390284276008606
+aggregate_path_range_mae,3.4963974098364514
+aggregate_step_1_ohlc_mae,5.143837610880534
+aggregate_step_1_range_mae,3.3145055135091144
+aggregate_horizon_ohlc_mae,21.117368952433267
+aggregate_step_1_close_mae,6.539920043945313
+aggregate_step_3_close_mae,13.844502258300782
+aggregate_step_5_close_mae,18.540961710611978
+aggregate_step_7_close_mae,21.738533528645835
